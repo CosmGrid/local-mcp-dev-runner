@@ -113,7 +113,18 @@ WORKTREE_BASE  = $HOME/.local/share/local-mcp-dev-runner/worktrees
 
 **这意味着 `server.mjs` 里没有任何测试专用代码路径。** 部署到 RUNTIME_ROOT 的文件，与被测的文件，逐字节相同。
 
-## 7. 相关文档
+## 7. 结构化输出契约（v1.1.0 新增）
+
+每个工具现在除了 `inputSchema` 之外，还声明一个 `outputSchema`（Zod 对象 → JSON Schema），并且成功返回除了文本 `content` 外，还携带机器可解析的 `structuredContent`。
+
+- `structuredContent` 的字段与 `outputSchema` 严格对应，且 `additionalProperties: false`，所以客户端可以稳定地按字段名取值，而不必解析自由文本。
+- 错误处理路径（`isError: true` 或抛出异常）不携带 `structuredContent`，沿用原有的文本错误消息，符合 MCP 协议语义。
+- `run_script` 在 v1.0 / v1.1.0 中仍是无条件拒绝，其 `outputSchema` 仅为契约占位，运行时不可达。
+- 输入契约（`inputSchema`）零变更：本工作包只新增输出侧契约，未触碰任何工具参数。输入兼容性由 `npm run gate:input-compat` 守护（与基线 commit `8137b48` 逐字段对比）。
+
+相关测试见 `tests/schema.test.mjs`：既验证 22/22 工具都声明了 `outputSchema`，也用真实工具调用把 `structuredContent` 对照其声明的 `outputSchema` 做 JSON Schema 校验。
+
+## 8. 相关文档
 
 - [docs/SOURCE_VS_RUNTIME.md](docs/SOURCE_VS_RUNTIME.md) — 两个根目录的详细职责与判定规则
 - [docs/OPERATIONS.md](docs/OPERATIONS.md) — 部署、回滚、运行手册

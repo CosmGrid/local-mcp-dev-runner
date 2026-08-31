@@ -2,7 +2,7 @@
 
 一个运行在你自己机器上的 **stdio MCP server**，让 ChatGPT（经由 Secure MCP Tunnel）能够 **只读** 地查看你本地已注册的 Git 仓库，并在严格受限的 runner-managed worktree 里做有限的写入。
 
-版本：1.0.0 · 工具数：22 · 状态：V1 baseline（已通过 Final Gate 与真实工作流 Gate）
+版本：1.1.0 · 工具数：22 · 状态：V1 baseline + 结构化输出契约（A3 OUTPUT-SCHEMA）
 
 ---
 
@@ -19,6 +19,8 @@
 | 受控分支与工作区 | `git_create_branch`、`git_worktree_create`、`git_worktree_remove` |
 | 受控提交 | `git_commit` |
 | 脚本（**永久关闭**） | `project_scripts`、`run_script` |
+
+> **结构化输出（v1.1.0 新增）**：每个工具现在都声明了 `outputSchema`，成功返回在原有文本 `content` 之外还携带机器可解析的 `structuredContent`，MCP 客户端（ChatGPT 等）可以稳定地按字段名取值，而不必解析自由文本。输入契约（`inputSchema`）零变更。
 
 ## 2. 为什么存在
 
@@ -132,10 +134,12 @@ RUNTIME_ROOT $HOME/.local/share/local-mcp-dev-runner   ← 部署目标，勿手
 
 ```bash
 npm run check           # 语法门禁：全量 .mjs 解析
-npm test                # 全部测试（当前 64 项）
+npm test                # 全部测试（当前 70 项：64 行为 + 6 输出 schema）
 npm run test:security   # 仅安全套件
 npm run test:inventory  # 仅工具清单
 npm run gate:security   # 静态安全策略门禁（守卫是否仍存在于源码）
+npm run gate:input-compat  # 输入契约 vs 基线 8137b48 零变更
+npm run gate:schema        # 22/22 outputSchema 覆盖 + structuredContent 校验
 npm run gate:secret-scan
 npm run gate:all        # 以上全部
 npm run verify:runtime  # 校验已部署的 runtime（只读）

@@ -65,6 +65,11 @@ function text(value) {
   };
 }
 
+function structured(value, textValue) {
+  const textResult = text(textValue ?? value);
+  return { ...textResult, structuredContent: value };
+}
+
 function sha256Buffer(value) {
   return createHash("sha256").update(value).digest("hex");
 }
@@ -716,17 +721,27 @@ server.registerTool(
   {
     title: "List registered projects",
     description: "List projects registered with the local MCP runner and their access mode.",
-    inputSchema: z.object({})
+    inputSchema: z.object({}),
+    outputSchema: z.object({
+      projects: z.array(z.object({
+        name: z.string(),
+        mode: z.enum(["READ_ONLY", "READ_WRITE"]),
+        managedWorktree: z.boolean(),
+        sourceProject: z.string().nullable(),
+        branch: z.string().nullable()
+      }))
+    })
   },
   async () => {
     const registry = await loadRegistry();
-    return text(Object.entries(registry.projects).map(([name, project]) => ({
+    const projects = Object.entries(registry.projects).map(([name, project]) => ({
       name,
       mode: project.write === true ? "READ_WRITE" : "READ_ONLY",
       managedWorktree: project.managedWorktree === true,
       sourceProject: project.sourceProject || null,
       branch: project.branch || null
-    })));
+    }));
+    return structured({ projects }, projects);
   }
 );
 
@@ -735,12 +750,26 @@ server.registerTool(
   {
     title: "Project information",
     description: "Return project root, access mode, managed-worktree metadata, and Git branch state.",
-    inputSchema: z.object({ project: z.string().min(1) })
+    inputSchema: z.object({ project: z.string().min(1) }),
+    outputSchema: z.object({
+      project: z.string(),
+      root: z.string(),
+      mode: z.enum(["READ_ONLY", "READ_WRITE"]),
+      managedWorktree: z.boolean(),
+      sourceProject: z.string().nullable(),
+      configuredBranch: z.string().nullable(),
+      git: z.object({
+        isGit: z.boolean(),
+        topLevel: z.string().nullable(),
+        branch: z.string().nullable(),
+        detached: z.boolean()
+      })
+    })
   },
   async ({ project }) => {
     const resolved = await resolveProject(project);
     const git = await getGitState(resolved);
-    return text({
+    return structured({
       project,
       root: resolved.root,
       mode: resolved.write ? "READ_WRITE" : "READ_ONLY",
@@ -760,6 +789,15 @@ server.registerTool(
     inputSchema: z.object({
       project: z.string().min(1),
       path: z.string().default(".")
+    }),
+    outputSchema: z.object({
+      project: z.string(),
+      path: z.string(),
+      entries: z.array(z.object({
+        name: z.string(),
+        type: z.enum(["directory", "file", "symlink", "other"])
+      })),
+      truncated: z.boolean()
     })
   },
   async ({ project, path: requestedPath }) => {
@@ -774,7 +812,7 @@ server.registerTool(
         name: entry.name,
         type: entry.isDirectory() ? "directory" : entry.isFile() ? "file" : entry.isSymbolicLink() ? "symlink" : "other"
       }));
-    return text({
+    return structured({
       project,
       path: resolved.relativePath,
       entries: safeEntries,
@@ -793,6 +831,15 @@ server.registerTool(
       path: z.string().default("."),
       nameContains: z.string().default(""),
       maxResults: z.number().int().min(1).max(MAX_SEARCH_RESULTS).default(100)
+    }),
+    outputSchema: z.object({
+      project: z.string(),
+      path: z.string(),
+      results: z.array(z.object({
+        path: z.string(),
+        type: z.enum(["directory", "file", "other"])
+      })),
+      truncated: z.boolean()
     })
   },
   async ({ project, path: requestedPath, nameContains, maxResults }) => {
@@ -801,7 +848,7 @@ server.registerTool(
     const stat = await fs.stat(resolved.absolutePath);
     if (!stat.isDirectory()) throw new Error("Requested path is not a directory");
     const results = await collectFiles(project, resolved.absolutePath, resolved.relativePath, { nameContains, maxResults });
-    return text({ project, path: resolved.relativePath, results, truncated: results.length >= maxResults });
+    return structured({ project, path: resolved.relativePath, results, truncated: results.length >= maxResults });
   }
 );
 
@@ -816,11 +863,22 @@ server.registerTool(
       query: z.string().min(1),
       caseSensitive: z.boolean().default(false),
       maxResults: z.number().int().min(1).max(MAX_SEARCH_RESULTS).default(100)
+    }),
+    outputSchema: z.object({
+      project: z.string(),
+      query: z.string(),
+      results: z.array(z.object({
+        path: z.string(),
+        line: z.number().int(),
+        column: z.number().int(),
+        preview: z.string()
+      })),
+      truncated: z.boolean()
     })
   },
   async ({ project, path: requestedPath, query, caseSensitive, maxResults }) => {
     const results = await searchText(project, requestedPath, query, caseSensitive, maxResults);
-    return text({ project, query, results, truncated: results.length >= maxResults });
+    return structured({ project, query, results, truncated: results.length >= maxResults });
   }
 );
 
@@ -832,11 +890,16 @@ server.registerTool(
     inputSchema: z.object({
       project: z.string().min(1),
       path: z.string().min(1)
+    }),
+    outputSchema: z.object({
+      project: z.string(),
+      path: z.string(),
+      content: z.string()
     })
   },
   async ({ project, path: requestedPath }) => {
     const result = await readTextFile(project, requestedPath);
-    return text({ project, path: result.resolved.relativePath, content: result.content });
+    return structured({ project, path: result.resolved.relativePath, content: result.content });
   }
 );
 
@@ -848,6 +911,13 @@ server.registerTool(
     inputSchema: z.object({
       project: z.string().min(1),
       paths: z.array(z.string().min(1)).min(1).max(20)
+    }),
+    outputSchema: z.object({
+      project: z.string(),
+      files: z.array(z.object({
+        path: z.string(),
+        content: z.string()
+      }))
     })
   },
   async ({ project, paths }) => {
@@ -859,7 +929,7 @@ server.registerTool(
       if (totalBytes > 1024 * 1024) throw new Error("Combined read exceeds 1 MiB limit");
       files.push({ path: result.resolved.relativePath, content: result.content });
     }
-    return text({ project, files });
+    return structured({ project, files });
   }
 );
 
@@ -871,11 +941,17 @@ server.registerTool(
     inputSchema: z.object({
       project: z.string().min(1),
       path: z.string().min(1)
+    }),
+    outputSchema: z.object({
+      project: z.string(),
+      path: z.string(),
+      bytes: z.number().int(),
+      sha256: z.string()
     })
   },
   async ({ project, path: requestedPath }) => {
     const result = await readTextFile(project, requestedPath, MAX_WRITE_FILE_BYTES);
-    return text({
+    return structured({
       project,
       path: result.resolved.relativePath,
       bytes: result.buffer.length,
@@ -892,9 +968,14 @@ server.registerTool(
     inputSchema: z.object({
       project: z.string().min(1),
       path: z.string().min(1)
+    }),
+    outputSchema: z.object({
+      project: z.string(),
+      path: z.string(),
+      created: z.boolean()
     })
   },
-  async ({ project, path: requestedPath }) => text(await createDirectorySafely(project, requestedPath))
+  async ({ project, path: requestedPath }) => structured(await createDirectorySafely(project, requestedPath))
 );
 
 server.registerTool(
@@ -906,6 +987,13 @@ server.registerTool(
       project: z.string().min(1),
       path: z.string().min(1),
       content: z.string()
+    }),
+    outputSchema: z.object({
+      project: z.string(),
+      path: z.string(),
+      created: z.boolean(),
+      bytes: z.number().int(),
+      sha256: z.string()
     })
   },
   async ({ project, path: requestedPath, content }) => {
@@ -915,7 +1003,7 @@ server.registerTool(
     }
     const resolved = await resolveNewFileTarget(project, requestedPath);
     await fs.writeFile(resolved.absolutePath, buffer, { flag: "wx", mode: 0o644 });
-    return text({
+    return structured({
       project,
       path: resolved.relativePath,
       created: true,
@@ -936,6 +1024,14 @@ server.registerTool(
       expectedSha256: z.string().regex(/^[a-fA-F0-9]{64}$/),
       oldText: z.string().min(1),
       newText: z.string()
+    }),
+    outputSchema: z.object({
+      project: z.string(),
+      path: z.string(),
+      replaced: z.boolean(),
+      previousSha256: z.string(),
+      sha256: z.string(),
+      bytes: z.number().int()
     })
   },
   async ({ project, path: requestedPath, expectedSha256, oldText, newText }) => {
@@ -979,7 +1075,7 @@ server.registerTool(
       throw error;
     }
 
-    return text({
+    return structured({
       project,
       path: resolved.relativePath,
       replaced: true,
@@ -999,6 +1095,11 @@ server.registerTool(
       project: z.string().min(1),
       path: z.string().min(1),
       expectedSha256: z.string().regex(/^[a-fA-F0-9]{64}$/)
+    }),
+    outputSchema: z.object({
+      project: z.string(),
+      path: z.string(),
+      deleted: z.boolean()
     })
   },
   async ({ project, path: requestedPath, expectedSha256 }) => {
@@ -1008,7 +1109,7 @@ server.registerTool(
       throw new Error("SHA-256 mismatch: file changed since it was inspected");
     }
     await fs.unlink(resolved.absolutePath);
-    return text({ project, path: resolved.relativePath, deleted: true });
+    return structured({ project, path: resolved.relativePath, deleted: true });
   }
 );
 
@@ -1017,12 +1118,16 @@ server.registerTool(
   {
     title: "Git status",
     description: "Return safe Git status while omitting sensitive-path entries.",
-    inputSchema: z.object({ project: z.string().min(1) })
+    inputSchema: z.object({ project: z.string().min(1) }),
+    outputSchema: z.object({
+      project: z.string(),
+      status: z.string()
+    })
   },
   async ({ project }) => {
     const result = await runGit(project, ["status", "--short", "--branch", "--untracked-files=normal"]);
     const lines = result.stdout.split("\n").filter((line) => !statusLineSensitive(line));
-    return text({ project, status: lines.join("\n") });
+    return structured({ project, status: lines.join("\n") });
   }
 );
 
@@ -1037,6 +1142,12 @@ server.registerTool(
       path: z.string().optional(),
       baseRef: z.string().optional(),
       headRef: z.string().optional()
+    }),
+    outputSchema: z.object({
+      project: z.string(),
+      diff: z.string(),
+      excludedSensitiveFiles: z.number().int(),
+      truncatedFiles: z.number().int()
     })
   },
   async ({ project, staged, path: requestedPath, baseRef, headRef }) => {
@@ -1059,14 +1170,14 @@ server.registerTool(
 
     const limited = safeFiles.slice(0, MAX_DIFF_FILES);
     if (limited.length === 0) {
-      return text({ project, diff: "", excludedSensitiveFiles, truncatedFiles: 0 });
+      return structured({ project, diff: "", excludedSensitiveFiles, truncatedFiles: 0 });
     }
 
     const args = ["diff", "--no-ext-diff", "--no-textconv", "--no-renames"];
     if (staged) args.push("--cached");
     args.push(...revisionArgs, "--", ...limited.map(literalPathspec));
     const result = await execGitAt(resolvedProject.root, args);
-    return text({
+    return structured({
       project,
       diff: clipText(result.stdout),
       excludedSensitiveFiles,
@@ -1084,6 +1195,10 @@ server.registerTool(
       project: z.string().min(1),
       limit: z.number().int().min(1).max(50).default(10),
       path: z.string().optional()
+    }),
+    outputSchema: z.object({
+      project: z.string(),
+      log: z.string()
     })
   },
   async ({ project, limit, path: requestedPath }) => {
@@ -1099,7 +1214,7 @@ server.registerTool(
       args.push("--", literalPathspec(safePath));
     }
     const result = await execGitAt(resolvedProject.root, args);
-    return text({ project, log: clipText(result.stdout) });
+    return structured({ project, log: clipText(result.stdout) });
   }
 );
 
@@ -1108,11 +1223,15 @@ server.registerTool(
   {
     title: "List Git branches",
     description: "List local Git branches and the current branch.",
-    inputSchema: z.object({ project: z.string().min(1) })
+    inputSchema: z.object({ project: z.string().min(1) }),
+    outputSchema: z.object({
+      project: z.string(),
+      branches: z.string()
+    })
   },
   async ({ project }) => {
     const result = await runGit(project, ["branch", "--format=%(HEAD)%09%(refname:short)%09%(objectname:short)%09%(subject)"]);
-    return text({ project, branches: result.stdout });
+    return structured({ project, branches: result.stdout });
   }
 );
 
@@ -1125,6 +1244,13 @@ server.registerTool(
       project: z.string().min(1),
       branch: z.string().min(1),
       baseRef: z.string().default("HEAD")
+    }),
+    outputSchema: z.object({
+      project: z.string(),
+      branch: z.string(),
+      baseRef: z.string(),
+      created: z.boolean(),
+      checkedOut: z.boolean()
     })
   },
   async ({ project, branch, baseRef }) => {
@@ -1136,7 +1262,7 @@ server.registerTool(
     if (exists.exitCode === 0) throw new Error(`Branch already exists: ${branch}`);
     await execGitAt(resolvedProject.root, ["rev-parse", "--verify", "--quiet", `${baseRef}^{commit}`]);
     await execGitAt(resolvedProject.root, ["branch", branch, baseRef]);
-    return text({ project, branch, baseRef, created: true, checkedOut: false });
+    return structured({ project, branch, baseRef, created: true, checkedOut: false });
   }
 );
 
@@ -1149,6 +1275,14 @@ server.registerTool(
       project: z.string().min(1),
       branch: z.string().min(1),
       baseRef: z.string().default("HEAD")
+    }),
+    outputSchema: z.object({
+      sourceProject: z.string(),
+      project: z.string(),
+      branch: z.string(),
+      root: z.string(),
+      mode: z.enum(["READ_WRITE"]),
+      created: z.boolean()
     })
   },
   async ({ project, branch, baseRef }) => {
@@ -1194,7 +1328,7 @@ server.registerTool(
       throw error;
     }
 
-    return text({
+    return structured({
       sourceProject: project,
       project: managedName,
       branch,
@@ -1210,7 +1344,14 @@ server.registerTool(
   {
     title: "Remove managed Git worktree",
     description: "Remove a clean runner-managed worktree and unregister it. Dirty worktrees are refused; the branch is retained.",
-    inputSchema: z.object({ project: z.string().min(1) })
+    inputSchema: z.object({ project: z.string().min(1) }),
+    outputSchema: z.object({
+      project: z.string(),
+      sourceProject: z.string(),
+      branch: z.string().nullable(),
+      removed: z.boolean(),
+      branchRetained: z.boolean()
+    })
   },
   async ({ project }) => {
     const registry = await loadRegistry();
@@ -1230,7 +1371,7 @@ server.registerTool(
     await execGitAt(source.root, ["worktree", "remove", target], { timeout: 120000 });
     delete registry.projects[project];
     await saveRegistry(registry);
-    return text({ project, sourceProject: entry.sourceProject, branch: entry.branch || null, removed: true, branchRetained: true });
+    return structured({ project, sourceProject: entry.sourceProject, branch: entry.branch || null, removed: true, branchRetained: true });
   }
 );
 
@@ -1242,6 +1383,12 @@ server.registerTool(
     inputSchema: z.object({
       project: z.string().min(1),
       message: z.string().min(1).max(2000)
+    }),
+    outputSchema: z.object({
+      project: z.string(),
+      branch: z.string().nullable(),
+      commit: z.string(),
+      output: z.string()
     })
   },
   async ({ project, message }) => {
@@ -1269,7 +1416,7 @@ server.registerTool(
 
     const result = await execGitAt(worktree.root, ["commit", "--no-verify", "-m", message], { timeout: 120000 });
     const head = await execGitAt(worktree.root, ["rev-parse", "--short", "HEAD"]);
-    return text({ project, branch: (await getGitState(worktree)).branch, commit: head.stdout.trim(), output: clipText(result.stdout + result.stderr) });
+    return structured({ project, branch: (await getGitState(worktree)).branch, commit: head.stdout.trim(), output: clipText(result.stdout + result.stderr) });
   }
 );
 
@@ -1278,9 +1425,17 @@ server.registerTool(
   {
     title: "List project scripts",
     description: "List package.json scripts and show that execution is disabled in the v1.0 security profile.",
-    inputSchema: z.object({ project: z.string().min(1) })
+    inputSchema: z.object({ project: z.string().min(1) }),
+    outputSchema: z.object({
+      project: z.string(),
+      packageManager: z.string().nullable(),
+      scripts: z.array(z.string()),
+      allowedScripts: z.array(z.string()).optional(),
+      executionEnabled: z.boolean(),
+      reason: z.string().optional()
+    })
   },
-  async ({ project }) => text(await packageScriptsFor(project))
+  async ({ project }) => structured(await packageScriptsFor(project))
 );
 
 server.registerTool(
@@ -1291,6 +1446,13 @@ server.registerTool(
     inputSchema: z.object({
       project: z.string().min(1),
       script: z.string().min(1)
+    }),
+    outputSchema: z.object({
+      project: z.string(),
+      script: z.string(),
+      exitCode: z.number().int(),
+      stdout: z.string(),
+      stderr: z.string()
     })
   },
   async ({ project }) => {

@@ -12,7 +12,9 @@
 | `npm run test:security` | 行为 | 全部安全守卫真的会拒绝 | 中 |
 | `npm test` | 行为 | 以上两组 | 中 |
 | `npm run gate:secret-scan` | 静态 | 待提交文件中有无密钥 / 绝对路径 / 用户名 | 快 |
-| `npm run gate:all` | 组合 | check → gate:security → test → gate:secret-scan | 中 |
+| `npm run gate:input-compat` | 静态/行为 | 与基线 `8137b48` 对比每个工具的 inputSchema 与名称，零变更才 PASS | 中 |
+| `npm run gate:schema` | 行为 | 运行 `tests/schema.test.mjs`：22/22 outputSchema 覆盖 + structuredContent 对照校验 | 中 |
+| `npm run gate:all` | 组合 | check → gate:security → gate:inventory → test → gate:input-compat → gate:schema → gate:secret-scan | 中 |
 | `npm run verify:runtime` | 只读校验 | 已部署 runtime 是否健康、是否与源码漂移 | 中 |
 
 ## 1. 语法门禁 `scripts/check-syntax.mjs`
@@ -75,7 +77,7 @@ WORKTREE_BASE = path.join(os.homedir(), ".local", "share", "local-mcp-dev-runner
 
 结果：**注册表、worktree 根目录、git 全局配置全部落在临时目录里，`server.mjs` 里没有任何测试专用代码路径。** 被测文件与部署到 RUNTIME_ROOT 的文件逐字节相同。
 
-**覆盖清单（64 项）**
+**覆盖清单（70 项）**
 
 | 文件 | 覆盖 |
 | --- | --- |
@@ -84,6 +86,7 @@ WORKTREE_BASE = path.join(os.homedir(), ".local", "share", "local-mcp-dev-runner
 | `tests/security/git.test.mjs` | 非 `mcp/*` 分支拒绝；保护分支拒绝写；非托管 worktree 不可移除；managed worktree 全生命周期（创建 → 写入 → 提交 → 脏拒绝移除 → 清理后移除 → 分支保留）；提交不含 `.env`；仅剩敏感变更时拒绝提交 |
 | `tests/security/run-script.test.mjs` | `run_script` 六种调用方式全部拒绝；`project_scripts` 报告执行已关闭 |
 | `tests/security/git-filter.test.mjs` | 全局装 LFS 但无 filter 规则 → 不阻断（3 个误报场景）；注释中的 filter → 不阻断；无害 attributes → 不阻断；仓库 `.gitattributes` / `core.attributesFile` / XDG attributes 含 filter → 阻断（3 个正向对照） |
+| `tests/schema.test.mjs` | 22/22 工具均声明 outputSchema（名称集合与基线精确一致、inputSchema 仍齐全）；真实调用文件写入链 / 只读路径 / git / worktree 链 / run_script DENY，将 `structuredContent` 对照其 `outputSchema` 做 JSON Schema 校验 |
 
 **测试不会做的事**：读写 `$HOME/.config/local-mcp-dev-runner/projects.json`；触碰任何真实业务仓库；启动 Tunnel；联网。
 
@@ -99,7 +102,27 @@ WORKTREE_BASE = path.join(os.homedir(), ".local", "share", "local-mcp-dev-runner
 
 关于最后两条规则的说明：把"当前 OS 用户名"和"绝对 home 路径"判为风险，是因为仓库的价值之一是**可移植**。一旦提交，这些值会泄漏到每一个克隆里，也让机器身份信息进入版本历史。文档因此统一使用 `$HOME` 与 `<PLACEHOLDER>`。
 
-## 6. 部署门禁 `scripts/verify-runtime.sh`
+## 6. 输入兼容性门禁 `scripts/check-input-compat.mjs`
+
+与基线 commit `8137b48` 对比每个工具的 **输入契约**，确保本工作包（只动输出侧）没有悄悄改变任何工具的调用面：
+
+1. 从 `8137b48` 提取当时的 `server.mjs`，与当前工作树 `server.mjs` 各拉起一次真实进程（基线副本提取到临时目录，并通过符号链接复用真实 `node_modules`，因此能像正式 server 一样启动）；
+2. 各自 `tools/list`，取每个工具的 `inputSchema`；
+3. 名称集合必须完全一致（无新增 / 无删除 / 无改名）；
+4. 每个同名工具的 `inputSchema` 必须深度相等。
+
+任一不一致即打印差异并 `INPUT_SCHEMA_COMPATIBILITY=FAIL` 退出 1；全部一致才输出 `INPUT_SCHEMA_COMPATIBILITY=PASS` 退出 0。
+
+## 7. 输出 schema 门禁 `tests/schema.test.mjs`
+
+`npm run gate:schema` 即运行该文件。它做两件事：
+
+1. **工具发现覆盖（OUTPUT_SCHEMA_COVERAGE = 22/22）**：`tools/list` 必须返回恰好 22 个工具，名称集合与 `tests/inventory.test.mjs` 固定的基线精确一致，每个工具都声明了 `outputSchema` 且根类型为 `object`、`additionalProperties: false`、`inputSchema` 仍齐全。
+2. **结构化结果校验**：对能在 fixture 中安全成功执行的工具（文件写入链、只读路径、git、worktree 链）做真实调用，取出 SDK 抽出的 `structuredContent`，用该工具自己声明的 `outputSchema` 跑 JSON Schema 校验；`run_script` 仍验证为 DENY 且不携带 `structuredContent`。
+
+这层门禁保证声明的 `outputSchema` 不是装饰——它真的匹配 handler 的实际返回。
+
+## 8. 部署门禁 `scripts/verify-runtime.sh`
 
 只读校验已部署 runtime，不修改任何东西：
 
@@ -111,7 +134,7 @@ WORKTREE_BASE = path.join(os.homedir(), ".local", "share", "local-mcp-dev-runner
 6. `sandbox/` `worktrees/` `logs/` 存在
 7. 与 SOURCE_ROOT 的哈希漂移（WARN；`STRICT=1` 时视为 FAIL）
 
-## 7. 提交前顺序
+## 9. 提交前顺序
 
 ```bash
 npm run gate:all

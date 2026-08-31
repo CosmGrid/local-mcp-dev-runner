@@ -6,6 +6,33 @@
 
 ---
 
+## [1.1.0] - 2026-08-31 — Structured output schemas (A3 OUTPUT-SCHEMA)
+
+为全部 22 个 MCP 工具补充正式的、可验证的 `outputSchema` / 结构化输出契约（structured output contract），让 ChatGPT 等 MCP 客户端能可靠地以机器可解析的方式取得工具结果（成功字段、类型、数组元素结构、git / worktree / file 结果），而不必解析自由文本。
+
+**范围严格限定在输出侧**：仅新增工具的输出 schema + 结构化内容适配器（`structured()` 辅助函数，保留原有文本 `content` 并附加 `structuredContent`）+ 相关测试 + 相关文档。未新增 / 删除 / 重命名任何工具，未改变任何工具输入参数与语义，未放松任何安全边界，`run_script` 仍为 DENY，未修改 runtime。
+
+**新增**
+- 22/22 工具声明 `outputSchema`（Zod 对象 → JSON Schema，`additionalProperties: false`，严格契约）
+- `server.mjs` 增加 `structured()` 辅助函数：`text(value)` 的 JSON 载荷作为 `structuredContent`，文本 `content` 100% 兼容保留
+- `list_projects` 顶层数组包装为 `{ projects }` 对象根，文本表示仍为数组
+- 测试 `tests/schema.test.mjs`（6 项）：工具发现覆盖（22/22 均声明 outputSchema、名称集合与基线精确一致、inputSchema 仍齐全）+ 结构化结果校验（真实调用文件写入链 / 只读路径 / git / worktree 链 / run_script DENY，取 `structuredContent` 对照其 `outputSchema` 做 JSON Schema 校验）
+- 输入兼容性门禁 `scripts/check-input-compat.mjs`：将基线 commit `8137b48` 与当前 `server.mjs` 的工具定义（inputSchema + 名称）做逐字段对比
+
+**门禁**
+- `npm run gate:input-compat` → `INPUT_SCHEMA_COMPATIBILITY=PASS`
+- `npm run gate:schema` → 运行 `tests/schema.test.mjs`
+- 两者已并入 `npm run gate:all`
+
+**验证状态**
+- 原有 64 项行为测试仍全绿（SDK 在调用时即按 `outputSchema` 校验 `structuredContent`，64/64 通过本身即证明每个工具的成功返回都满足其声明 schema）
+- `INPUT_SCHEMA_COMPATIBILITY=PASS`（22 工具，相对 `8137b48` 输入契约零变更）
+- `OUTPUT_SCHEMA_COVERAGE=22/22`
+- 密钥扫描 0 findings；源码与运行时 `server.mjs` 逐字节一致
+
+**已知限制**
+- 本工作包由 A3 实施并自报 `OUTPUT_SCHEMA_IMPLEMENTATION=PASS`，但须由 A1 独立执行 Final Gate 后方可 CLOSED；A3 不自行宣布 CLOSED。
+
 ## [1.0.0] - 2026-08-31 — Baseline
 
 首个正式版本。本版本 **不引入新功能或行为变更**，其唯一目的是把此前已在 runtime 上手工验证通过的 v1 实现，固化为一个可版本控制、可测试、可安装、可回滚的源码项目。
