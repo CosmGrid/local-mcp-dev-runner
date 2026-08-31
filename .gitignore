@@ -126,3 +126,7 @@ config/projects.local.json
 scripts/.env
 scripts/*.local.sh
 docs/*.local.md
+
+# WorkBuddy local working memory / runtime state for this project.
+# Holds only agent-local notes and run state; not part of source delivery.
+.workbuddy/
