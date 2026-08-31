@@ -1,0 +1,128 @@
+# ---------------------------------------------------------------------------
+# Local MCP Dev Runner - source repository ignore rules
+#
+# Principle: this repository holds SOURCE only.
+# Runtime state (registered projects, worktrees, sandbox data, logs, secrets)
+# lives under RUNTIME_ROOT and is never committed here.
+# ---------------------------------------------------------------------------
+
+# Dependencies
+node_modules/
+.npm/
+.yarn/
+.pnp.*
+.pnpm-store/
+
+# Logs and runtime output
+logs/
+*.log
+*.log.*
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+runner.log
+runner.err
+
+# Runtime state directories (RUNTIME_ROOT contents - never source)
+worktrees/
+sandbox/
+runtime/
+.local/
+run/
+
+# Environment and secrets
+.env
+.env.*
+*.env
+!.env.example
+secrets/
+secrets.*
+secret.*
+*secret*.json
+*credential*.json
+credentials
+credentials.*
+.htpasswd
+
+# Certificates and private keys
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+*.crt
+*.cer
+*.der
+*.ppk
+id_rsa
+id_rsa.*
+id_ed25519
+id_ed25519.*
+id_ecdsa
+id_ecdsa.*
+*.asc
+*.gpg
+
+# Cloud / API credentials
+.aws/
+.gcp/
+.azure/
+service-account*.json
+*.kdbx
+.netrc
+.npmrc
+.pypirc
+token
+token.*
+*.token
+api-key*
+apikey*
+
+# Backups produced by install / update / manual edits
+*.bak
+*.bak-*
+*.orig
+*.rej
+*~
+*.swp
+*.swo
+
+# Temporary Gate artifacts and scratch files
+gate-*.tmp
+gate-*.log
+.tmp/
+tmp/
+temp/
+*.tmp
+*.tmp-*
+*.local-mcp-tmp-*
+
+# Test / coverage / build output
+coverage/
+.nyc_output/
+dist/
+build/
+out/
+.cache/
+.tap/
+junit.xml
+test-results/
+
+# OS and editor noise
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+.idea/
+.vscode/
+*.code-workspace
+
+# Local overrides that must never be shared
+projects.json
+config/projects.local.json
+scripts/.env
+scripts/*.local.sh
+docs/*.local.md

@@ -1,0 +1,34 @@
+{
+  "_comment": [
+    "EXAMPLE ONLY - copy this file to RUNTIME config and edit it there.",
+    "Real config location: ~/.config/local-mcp-dev-runner/projects.json",
+    "The real file is RUNTIME STATE. It is never committed to this repository,",
+    "because it contains machine-specific absolute paths and access policy.",
+    "Copy with: cp config/projects.example.json ~/.config/local-mcp-dev-runner/projects.json",
+    "Then chmod 600 and replace every <PLACEHOLDER> with a real value."
+  ],
+  "projects": {
+    "<project-name>": {
+      "_doc": "Original repository. Keep write=false so the source of truth stays untouched.",
+      "root": "<ABSOLUTE_PATH_TO_PROJECT_ROOT>",
+      "write": false
+    },
+    "<project-name>-writable": {
+      "_doc": "Optional: a git worktree or scratch project that is allowed to accept writes.",
+      "root": "<ABSOLUTE_PATH_TO_WRITABLE_ROOT>",
+      "write": true,
+      "runScripts": false,
+      "allowedScripts": []
+    }
+  },
+  "_fieldReference": {
+    "root": "Absolute path to the project root. Must exist. Resolved with realpath before every operation.",
+    "write": "false = READ_ONLY (default). true = READ_WRITE, still subject to branch and sensitivity rules.",
+    "runScripts": "Reserved for a future sandboxed execution profile. Always false in v1.0.",
+    "allowedScripts": "Reserved allowlist for a future sandboxed execution profile. Always empty in v1.0.",
+    "managedWorktree": "Set automatically by git_worktree_create. Do not author this by hand.",
+    "sourceProject": "Set automatically by git_worktree_create. Do not author this by hand.",
+    "branch": "Set automatically by git_worktree_create. Do not author this by hand.",
+    "protectedBranches": "Optional extra branch names that must reject writes. Defaults already cover main and master."
+  }
+}

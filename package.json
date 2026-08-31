@@ -1,0 +1,28 @@
+{
+  "name": "local-mcp-dev-runner",
+  "version": "1.0.0",
+  "description": "Local MCP dev runner: read-mostly access to registered local repositories over a stdio MCP server, with a runner-managed git worktree as the only writable surface.",
+  "private": true,
+  "license": "UNLICENSED",
+  "type": "module",
+  "main": "server.mjs",
+  "engines": {
+    "node": ">=20.11.0"
+  },
+  "scripts": {
+    "start": "node server.mjs",
+    "check": "node scripts/check-syntax.mjs",
+    "test": "node --test --test-concurrency=4 tests/*.test.mjs tests/security/*.test.mjs",
+    "test:inventory": "node --test tests/inventory.test.mjs",
+    "test:security": "node --test --test-concurrency=4 tests/security/*.test.mjs",
+    "gate:security": "node scripts/check-security-policies.mjs",
+    "gate:inventory": "node scripts/check-inventory.mjs",
+    "gate:secret-scan": "bash scripts/secret-scan.sh",
+    "gate:all": "npm run check && npm run gate:security && npm run gate:inventory && npm run test && npm run gate:secret-scan",
+    "verify:runtime": "bash scripts/verify-runtime.sh"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "zod": "^4.5.4"
+  }
+}
