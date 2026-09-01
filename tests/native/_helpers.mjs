@@ -15,7 +15,7 @@ import os from "node:os";
 import path from "node:path";
 import fs from "node:fs/promises";
 import { mkdtemp } from "node:fs/promises";
-import { SandboxExecBackend } from "../../scripts/sandbox-backend.mjs";
+import { SandboxExecBackend } from "../../scripts/sandbox-backend-sandbox-exec.mjs";
 import { buildSandboxEnv } from "../../scripts/sandbox-env.mjs";
 import { nodeBinDirsFor } from "../../scripts/script-execution.mjs";
 

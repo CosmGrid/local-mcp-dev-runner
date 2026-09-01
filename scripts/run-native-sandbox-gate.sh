@@ -45,6 +45,37 @@ if [ "$(uname)" != "Darwin" ]; then
   exit 1
 fi
 
+# 2.5 Backend import/bootstrap self-test.
+#
+# The native test suite imports SandboxExecBackend from tests/native/_helpers.mjs,
+# which in turn imports scripts/sandbox-backend-sandbox-exec.mjs. If that export
+# boundary is broken, every native test file crashes at module load with the same
+# SyntaxError. Catch it ONCE here, before the suite starts, and fail loudly with
+# NATIVE_BACKEND_IMPORT=FAIL instead of repeating the error six times.
+export LMDR_HELPERS_PATH="$REPO_ROOT/tests/native/_helpers.mjs"
+if node --input-type=module -e "
+import { pathToFileURL } from 'node:url';
+const target = pathToFileURL(process.env.LMDR_HELPERS_PATH).href;
+import(target)
+  .then((m) => {
+    if (typeof m.makeWorld !== 'function' || typeof m.runNode !== 'function') {
+      throw new Error('helpers module loaded but is missing exports (makeWorld/runNode)');
+    }
+    console.log('[native-gate] NATIVE_BACKEND_IMPORT=PASS');
+  })
+  .catch((e) => {
+    console.error('[native-gate] NATIVE_BACKEND_IMPORT=FAIL: ' + (e && e.message ? e.message : e));
+    process.exit(2);
+  });
+"; then
+  :
+else
+  echo "[native-gate] backend module failed to import -- native tests would crash at module load."
+  echo "[native-gate] Fix the export/import contract before running this gate in a native Terminal.app."
+  echo "[native-gate] P2 real-sandbox verification: NOT PASSED."
+  exit 2
+fi
+
 # 3. Run the real-sandbox test suite. node --test exits non-zero on any failure.
 echo "[native-gate] running tests/native/* (real sandbox-exec)..."
 node --test --test-concurrency=1 tests/native/*.test.mjs
