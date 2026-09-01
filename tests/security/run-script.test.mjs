@@ -2,11 +2,14 @@
  * Script execution gate (v2.0 — sandboxed run_script).
  *
  * run_script is no longer a permanent deny. It executes only when a sandbox
- * backend is available and the request passes every policy check. In this test
- * environment (WorkBuddy / nested sandbox) the macOS seatbelt backend reports
- * itself unavailable, so every execution is refused with SANDBOX_BACKEND_UNAVAILABLE
- * before any script could run. That is the correct fail-closed posture — not a
- * regression.
+ * backend is available and the request passes every policy check. The runner
+ * refuses execution in two valid fail-closed ways, depending on the host:
+ *  - nested / WorkBuddy sandbox: the macOS seatbelt backend is unavailable, so
+ *    every execution is refused with SANDBOX_BACKEND_UNAVAILABLE before any script could run.
+ *  - native macOS Terminal: the backend is available, but the fixture project is
+ *    not a Runner-managed READ_WRITE worktree, so the pipeline refuses with WORKTREE_NOT_MANAGED.
+ * Both are correct fail-closed postures, not regressions. The deny assertions
+ * below accept the relevant subset for each environment.
  *
  * The only gate that can actually run a script (gate:sandbox-real) must be
  * executed by the user in a native macOS Terminal.app.
@@ -47,7 +50,7 @@ describe("run_script policy deny", () => {
         name: "run_script",
         arguments: { project: "fixture-source", script: "test" }
       });
-      assertDenied(result, /SANDBOX_BACKEND_UNAVAILABLE/);
+      assertDenied(result, /(SANDBOX_BACKEND_UNAVAILABLE|WORKTREE_NOT_MANAGED)/);
     });
   });
 
@@ -57,7 +60,7 @@ describe("run_script policy deny", () => {
         name: "run_script",
         arguments: { project: "fixture-source", script: "totally-unknown-script" }
       });
-      assertDenied(result, /(SANDBOX_BACKEND_UNAVAILABLE|SCRIPT_NOT_ALLOWLISTED)/);
+      assertDenied(result, /(SANDBOX_BACKEND_UNAVAILABLE|SCRIPT_NOT_ALLOWLISTED|WORKTREE_NOT_MANAGED)/);
     });
   });
 
@@ -67,7 +70,7 @@ describe("run_script policy deny", () => {
         name: "run_script",
         arguments: { project: "fixture-source", script: "rm -rf /" }
       });
-      assertDenied(result, /(SANDBOX_BACKEND_UNAVAILABLE|SCRIPT_NOT_ALLOWLISTED|EXECUTABLE_OBVIOUS_DENY)/);
+      assertDenied(result, /(SANDBOX_BACKEND_UNAVAILABLE|SCRIPT_NOT_ALLOWLISTED|EXECUTABLE_OBVIOUS_DENY|WORKTREE_NOT_MANAGED)/);
     });
   });
 
