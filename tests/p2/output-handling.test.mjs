@@ -20,9 +20,9 @@ describe("sanitizeOutput", () => {
     assert.equal(r.text, "hello world");
   });
   it("redacts credential-shaped substrings", () => {
-    const r = sanitizeOutput("token sk-1234567890abcdef1234 leaked");
+    const r = sanitizeOutput("token sk-1234567890abcdef leaked");
     assert.match(r.text, /\[redacted:openai-key\]/);
-    assert.doesNotMatch(r.text, /sk-1234567890abcdef1234/);
+    assert.doesNotMatch(r.text, /sk-1234567890abcdef/);
   });
   it("truncates oversized multi-line output head/tail", () => {
     const lines = Array.from({ length: 200 }, () => "y".repeat(2000)).join("\n");
@@ -40,7 +40,7 @@ describe("stripAnsi / redact", () => {
     assert.equal(stripAnsi("\u001b[31mred\u001b[0m"), "red");
   });
   it("redact replaces matched patterns", () => {
-    assert.equal(redact("key sk-1234567890abcdef1234"), "key [redacted:openai-key]");
+    assert.equal(redact("key sk-1234567890abcdef"), "key [redacted:openai-key]");
   });
   it("REDACTION_PATTERNS is non-empty", () => {
     assert.ok(REDACTION_PATTERNS.length > 0);
