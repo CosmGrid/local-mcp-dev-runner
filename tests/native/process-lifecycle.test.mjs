@@ -22,12 +22,20 @@ describe("P2 native process lifecycle and descendant reaping", () => {
     // Spawn a long-running grandchild in the SAME process group (no detached),
     // then keep the main script alive until the runner's timeout fires.
     const code = [
+      "process.stdout.write('STARTED;');",
       "const cp=require('child_process');",
       "cp.spawn('sleep',['60'],{stdio:'ignore'});",
       "setInterval(()=>{},1000);"
     ].join("");
     const result = await runNode(world, code, 1500);
+    assert.match(result.stdout, /STARTED/, "parent target must have started before the timeout fired");
     assert.equal(result.timedOut, true, `expected a timeout, got exitCode=${result.exitCode}`);
+    // The group must be torn down by a real signal (not a clean exit): the
+    // runner preserves `signal` even when exit code is normalized to -1.
+    assert.ok(
+      ["SIGTERM", "SIGKILL"].includes(result.signal),
+      `process group must be killed by a signal, got signal=${result.signal} exitCode=${result.exitCode}`
+    );
     assert.equal(
       result.descendantsRemaining,
       false,

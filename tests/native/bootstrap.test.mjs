@@ -28,4 +28,17 @@ describe("P2 native bootstrap", () => {
     assert.ok(profile.includes("(deny network*)"), "profile must deny all network access");
     assert.ok(profile.includes("process-exec*"), "profile must constrain process execution");
   });
+
+  it("grants root read-traversal but keeps sensitive paths denied (path-traversal fix)", () => {
+    const profile = world.backend.generateProfile(world.context);
+    const rootAllow = profile.indexOf(`(allow file-read* (subpath "/"))`);
+    const realHomeDeny = profile.indexOf(`(deny file-read-data (subpath "${world.realHome}"))`);
+    const runtimeDeny = profile.indexOf(`(deny file-read-data (subpath "${world.runtimeRoot}"))`);
+    assert.ok(rootAllow >= 0, "profile must grant root read-traversal (fixes bootstrap SIGABRT)");
+    // First-match-wins: the broad root allow must come AFTER the sensitive denies.
+    assert.ok(realHomeDeny >= 0 && realHomeDeny < rootAllow, "real home must stay denied before root allow");
+    assert.ok(runtimeDeny >= 0 && runtimeDeny < rootAllow, "runtime root must stay denied before root allow");
+    assert.ok(profile.includes(`(deny process-exec* (literal "/usr/bin/git"))`), "dangerous executables denied via literal");
+    assert.ok(!profile.includes(`(subpath "/usr/bin/git ")`), "dead trailing-space exec deny must be gone");
+  });
 });

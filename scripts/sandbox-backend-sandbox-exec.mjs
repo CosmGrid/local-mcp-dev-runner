@@ -98,7 +98,13 @@ const SYSTEM_READ_PATHS = Object.freeze([
   "/private/etc/localtime",
   "/etc/localtime",
   "/etc/hosts",
-  "/etc/resolv.conf"
+  "/etc/resolv.conf",
+  // Root read-traversal is required so the dynamic linker can resolve /bin/echo,
+  // the node binary, and system libraries during bootstrap (fixes SIGABRT).
+  // This is read-only; write and network remain denied. The deny rules in
+  // generateProfile are emitted BEFORE these allows so first-match-wins keeps
+  // sensitive paths (realHome / runtimeRoot / configDir) sealed.
+  "/"
 ]);
 
 function sb(value) {
@@ -286,16 +292,13 @@ export class SandboxExecBackend {
     }
     lines.push("");
 
-    lines.push(";; ---- filesystem: readonly ----------------------------------------");
-    for (const dir of readPaths) {
-      if (writePaths.includes(dir)) continue;
-      lines.push(`(allow file-read* (subpath ${sb(dir)}))`);
-    }
-    lines.push("");
-
     lines.push(";; ---- filesystem: denied -----------------------------------------");
     lines.push(";; Sealed ancestors: the current worktree must stay usable, so only its");
     lines.push(";; PARENT directories are denied, never the worktree itself.");
+    lines.push(";;");
+    lines.push(";; NOTE: these deny rules MUST precede the broad root read-allow below.");
+    lines.push(";; SBPL evaluates rules first-match-wins, so ordering the denies before");
+    lines.push(";; the allows is what keeps realHome / runtimeRoot / configDir sealed.");
     for (const dir of parentDirs) {
       lines.push(`(deny file-read-data (regex #"^${regexLiteral(dir)}/[^/]+$"))`);
     }
@@ -309,10 +312,25 @@ export class SandboxExecBackend {
       lines.push(`(deny file-read-data (subpath ${sb(path.join(realHome, "Library/Application Support/com.apple.TCC"))}))`);
       lines.push(`(deny file-read-data (subpath ${sb(path.join(realHome, "Library/Keychains"))}))`);
     }
+    // The root read-allow below would otherwise make the real home readable
+    // (it was only blocked before by the absence of any allow). Re-seal it
+    // explicitly so the user's real HOME stays fully unreadable in the sandbox.
+    if (realHome) lines.push(`(deny file-read-data (subpath ${sb(realHome)}))`);
     if (runtimeRoot) lines.push(`(deny file-read-data (subpath ${sb(runtimeRoot)}))`);
     if (configDir) lines.push(`(deny file-read-data (subpath ${sb(configDir)}))`);
     for (const dir of uniquePaths(extraDenyReadPaths)) {
       lines.push(`(deny file-read-data (subpath ${sb(dir)}))`);
+    }
+    lines.push("");
+
+    lines.push(";; ---- filesystem: readonly ----------------------------------------");
+    lines.push(";; Root read-traversal (/) lets the dynamic linker resolve /bin/echo,");
+    lines.push(";; the node binary, and system libraries during bootstrap (fixes the");
+    lines.push(";; SIGABRT seen when / was absent). Read-only: write and network stay");
+    lines.push(";; denied, and the sensitive-path denies above still win first-match.");
+    for (const dir of readPaths) {
+      if (writePaths.includes(dir)) continue;
+      lines.push(`(allow file-read* (subpath ${sb(dir)}))`);
     }
     lines.push("");
 
@@ -412,8 +430,10 @@ export class SandboxExecBackend {
 }
 
 function execRulesDeny(lines, binary) {
+  // Exact-path deny. The previous second rule used a trailing space
+  // `(subpath "/usr/bin/git ")` which never matched a real path and was dead.
+  // The literal deny below is the effective, explicit block for each binary.
   lines.push(`(deny process-exec* (literal ${sb(binary)}))`);
-  lines.push(`(deny process-exec* (subpath ${sb(`${binary} `)}))`);
 }
 
 function assertAbsolute(name, value) {

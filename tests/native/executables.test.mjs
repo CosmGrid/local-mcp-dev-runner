@@ -43,7 +43,11 @@ describe("P2 native executable allow/deny (SBPL rule order)", () => {
       cwd: world.worktreeRoot,
       timeoutMs: 15000
     });
-    assert.notEqual(result.exitCode, 0, "curl must be denied by the sandbox exec policy");
-    assert.doesNotMatch(result.stdout, /curl/i);
+    // curl's exec is denied by the literal SBPL rule, so the curl process never
+    // starts (TARGET_NEVER_RAN): it cannot print its version banner and exits
+    // non-zero. This is distinct from network/fs denies where the target node
+    // starts and the operation is refused inside it.
+    assert.notEqual(result.exitCode, 0, "curl must be denied by the sandbox exec policy (TARGET_NEVER_RAN)");
+    assert.doesNotMatch(result.stdout, /curl/i, "curl must not have executed (no version banner)");
   });
 });

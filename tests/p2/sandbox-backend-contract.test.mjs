@@ -68,6 +68,27 @@ describe("SandboxExecBackend export contract (native helper dependency)", () => 
     assert.ok(profile.includes("(deny network*)"), "profile must deny all network");
   });
 
+  it("grants root read-traversal but keeps sensitive paths denied (no dead exec rule)", () => {
+    const backend = new SandboxExecBackend();
+    const ctx = {
+      worktreeRoot: "/w",
+      homeRoot: "/h",
+      tmpRoot: "/t",
+      realHome: "/rh",
+      runtimeRoot: "/rt",
+      configFilePath: "/rt/projects.json",
+      nodeBinDirs: ["/opt/node/bin"]
+    };
+    const profile = backend.generateProfile(ctx);
+    const rootAllow = profile.indexOf(`(allow file-read* (subpath "/"))`);
+    const realHomeDeny = profile.indexOf(`(deny file-read-data (subpath "/rh"))`);
+    const gitLiteral = profile.indexOf(`(deny process-exec* (literal "/usr/bin/git"))`);
+    assert.ok(rootAllow >= 0, "profile must grant root read-traversal");
+    assert.ok(realHomeDeny >= 0 && realHomeDeny < rootAllow, "realHome deny must precede root allow");
+    assert.ok(gitLiteral >= 0, "dangerous executables must be denied via literal rule");
+    assert.ok(!profile.includes(`(subpath "/usr/bin/git ")`), "dead trailing-space exec deny must be gone");
+  });
+
   it("cleanup is callable without throwing", async () => {
     const backend = new SandboxExecBackend();
     const result = await backend.cleanup({ pgid: null, paths: [] });

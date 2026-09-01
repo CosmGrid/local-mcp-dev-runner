@@ -59,6 +59,26 @@ describe("SandboxExecBackend.generateProfile", () => {
     assert.equal(new SandboxExecBackend().execRuleOrder, EXEC_RULE_ORDER.ALLOW_THEN_DENY);
     assert.equal(DEFAULT_EXEC_RULE_ORDER, EXEC_RULE_ORDER.ALLOW_THEN_DENY);
   });
+  it("adds a root read-traversal allow, emitted AFTER the sensitive-path denies", () => {
+    // First-match-wins: the broad (allow file-read* (subpath "/")) must come
+    // after the realHome/runtimeRoot denies, else it would override them.
+    const rootAllow = profile.indexOf(`(allow file-read* (subpath "/"))`);
+    const realHomeDeny = profile.indexOf(`(deny file-read-data (subpath "/rh"))`);
+    const runtimeDeny = profile.indexOf(`(deny file-read-data (subpath "/rt"))`);
+    assert.ok(rootAllow >= 0, "profile must grant root read-traversal (fixes bootstrap SIGABRT)");
+    assert.ok(realHomeDeny >= 0 && realHomeDeny < rootAllow, "realHome deny must precede root allow");
+    assert.ok(runtimeDeny >= 0 && runtimeDeny < rootAllow, "runtimeRoot deny must precede root allow");
+  });
+  it("denies dangerous executables with a clean literal rule (no dead trailing-space subpath)", () => {
+    for (const bin of DENIED_EXECUTABLES) {
+      assert.ok(profile.includes(`(deny process-exec* (literal "${bin}")`));
+      // The old `(subpath "/usr/bin/git ")` (trailing space) was a dead rule.
+      assert.ok(!profile.includes(`(subpath "${bin} ")`), `dead trailing-space deny must be gone: ${bin}`);
+    }
+  });
+  it("re-seals the real home so it stays unreadable under the root read allow", () => {
+    assert.ok(profile.includes(`(deny file-read-data (subpath "/rh"))`));
+  });
 });
 
 describe("parentsOf", () => {
