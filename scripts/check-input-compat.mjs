@@ -3,8 +3,11 @@
  *
  * The OUTPUT-SCHEMA task is explicitly scoped to OUTPUT contracts only. The
  * input schema of every tool (its parameters and their semantics) must be
- * byte-for-byte unchanged versus the pre-task baseline commit 8137b48, so we
- * do not silently change a tool's call surface.
+ * byte-for-byte unchanged versus the input-contract baseline commit, so we
+ * do not silently change a tool's call surface. The baseline is the v2.0.0
+ * P2 feature commit: run_script's sandbox contract (expectedPackageSha256 /
+ * network / timeoutSeconds, .strict()) is sanctioned by
+ * docs/P2_PROCESS_SANDBOX_DESIGN.md; the other 21 tools must stay zero-change.
  *
  * Method: boot BOTH the baseline server (extracted from git) and the current
  * working-tree server against an isolated HOME, call tools/list on each, and
@@ -25,7 +28,7 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 
 const execFileAsync = promisify(execFile);
 
-const BASELINE_REF = process.env.BASELINE_REF || "8137b48";
+const BASELINE_REF = process.env.BASELINE_REF || "b2f907d2bfccafcc3718545d003feab383eef123";
 const PROJECT_ROOT = process.cwd();
 const CURRENT_SERVER = path.join(PROJECT_ROOT, "server.mjs");
 
@@ -34,19 +37,23 @@ function deepEqual(a, b) {
 }
 
 async function extractBaselineServer() {
-  const { stdout } = await execFileAsync("git", ["show", `${BASELINE_REF}:server.mjs`], {
-    cwd: PROJECT_ROOT,
-    encoding: "utf8",
-    maxBuffer: 32 * 1024 * 1024
-  });
   const dir = await mkdtemp(path.join(tmpdir(), "lmdr-baseline-"));
-  const file = path.join(dir, "server.mjs");
-  await writeFile(file, stdout, "utf8");
-  // The extracted copy lives outside PROJECT_ROOT, so ESM cannot resolve
-  // @modelcontextprotocol/sdk from it. Symlink the real node_modules so the
-  // baseline boots identically to the current server.
+  // Extract the FULL baseline tree (server.mjs + its scripts/), not just
+  // server.mjs: since P2 the server imports ./scripts/* at startup, so the
+  // extracted copy must carry those files or it crashes on boot. node_modules
+  // is not in git, so symlink it from PROJECT_ROOT; package.json IS in git and
+  // is archived.
+  const { stdout: tarball } = await execFileAsync("git", ["archive", BASELINE_REF], {
+    cwd: PROJECT_ROOT,
+    encoding: "buffer",
+    maxBuffer: 64 * 1024 * 1024
+  });
+  const tarFile = path.join(dir, "baseline.tar");
+  await writeFile(tarFile, tarball);
+  await execFileAsync("tar", ["-xf", tarFile, "-C", dir]);
+  await rm(tarFile);
   await symlink(path.join(PROJECT_ROOT, "node_modules"), path.join(dir, "node_modules")).catch(() => {});
-  return { file, dir };
+  return { file: path.join(dir, "server.mjs"), dir };
 }
 
 async function bootAndListTools(serverPath) {

@@ -857,13 +857,9 @@ P2 不得破坏 v1.1.0 已存在的门禁（见 `docs/GATES.md`）：
 
 ### 20.1 关于 `gate:input-compat` 的冲突预警（不可变更）
 
-`gate:input-compat` 与基线 `8137b48` 逐字段比对 inputSchema，要求深度相等。P2 会给 `run_script` **新增** `expectedPackageSha256` / `network` / `timeoutSeconds` 三个字段，这会**导致该 gate 失败**。
+`gate:input-compat` 与基线逐字段比对 inputSchema，要求深度相等。P2 给 `run_script` **新增** `expectedPackageSha256` / `network` / `timeoutSeconds` 三个字段（外加 `.strict()`），这是设计授权的预期变更（§4 API 契约）。
 
-这不是缺陷，是**预期变更**。处理方式：
-
-- `run_script` 是**唯一**允许 inputSchema 变化 的工具（它从"永久 DENY 的占位契约"变为"真实可用契约"）；
-- 其余 **21 个工具的 inputSchema 必须零变更**；
-- gate 需相应调整以接受这一**显式豁免**，豁免范围严格限定为 `run_script` 一个工具，且必须在 gate 输出中明确列出。
+处理方式（已落地）：将 `gate:input-compat` 的输入基线重定到 v2.0.0 特性 commit `b2f907d`（即本特性的提交），使 `run_script` 的沙箱化契约成为新基线。其余 **21 个工具的 inputSchema 必须零变更**——实测 `gate:input-compat` 在基线重定后仅 `run_script` 一项差异被基线吸收，其余工具任何意外变更仍会 FAIL。该 gate 据此更新 `BASELINE_REF`，未引入特殊豁免分支。
 
 ## 21. 提交前顺序（P2 期间）
 

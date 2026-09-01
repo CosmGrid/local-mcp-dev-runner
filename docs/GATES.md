@@ -12,7 +12,7 @@
 | `npm run test:security` | 行为 | 全部安全守卫真的会拒绝 | 中 |
 | `npm test` | 行为 | 以上两组 | 中 |
 | `npm run gate:secret-scan` | 静态 | 待提交文件中有无密钥 / 绝对路径 / 用户名 | 快 |
-| `npm run gate:input-compat` | 静态/行为 | 与基线 `8137b48` 对比每个工具的 inputSchema 与名称，零变更才 PASS | 中 |
+| `npm run gate:input-compat` | 静态/行为 | 与基线 `b2f907d`（v2.0.0 run_script 沙箱化契约）对比每个工具的 inputSchema 与名称，仅 run_script 一项被设计授权，其余 21 工具零变更才 PASS | 中 |
 | `npm run gate:schema` | 行为 | 运行 `tests/schema.test.mjs`：22/22 outputSchema 覆盖 + structuredContent 对照校验 | 中 |
 | `npm run gate:p2-unit` | 静态/行为 | 运行 `tests/p2/*.test.mjs`：脚本策略 / 显式拒绝 / 沙箱环境 / 后端 profile / 进程 runner 源码不变量 / 审计日志 / 敏感 worktree 扫描（WorkBuddy 嵌套沙箱内可跑） | 中 |
 | `npm run gate:sandbox-real` | 真实沙箱 | `bash scripts/run-native-sandbox-gate.sh`：真实 macOS Seatbelt 隔离断言；**须原生 Terminal 跑**，嵌套沙箱内必 exit 71（fail-closed，不假 PASS） | 中 |

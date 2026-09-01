@@ -138,7 +138,7 @@ npm test                # 全部测试（tests/ + tests/security/ + tests/p2/；
 npm run test:security   # 仅安全套件
 npm run test:inventory  # 仅工具清单
 npm run gate:security   # 静态安全策略门禁（守卫是否仍存在于源码）
-npm run gate:input-compat  # 输入契约 vs 基线 8137b48 零变更
+npm run gate:input-compat  # 输入契约 vs 基线 b2f907d（v2.0.0 run_script 沙箱化；其余 21 工具零变更）
 npm run gate:schema        # 22/22 outputSchema 覆盖 + structuredContent 校验
 npm run gate:secret-scan
 npm run gate:p2-unit     # P2 单元/镜像/静态门禁（tests/p2，WorkBuddy 嵌套沙箱内可跑）
