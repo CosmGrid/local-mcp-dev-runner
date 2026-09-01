@@ -9,6 +9,7 @@
 import { describe, it, before } from "node:test";
 import assert from "node:assert/strict";
 import { makeWorld } from "./_helpers.mjs";
+import { canonicalizePath } from "../../scripts/sandbox-backend-sandbox-exec.mjs";
 
 describe("P2 native bootstrap", () => {
   let world;
@@ -32,8 +33,14 @@ describe("P2 native bootstrap", () => {
   it("grants root read-traversal but keeps sensitive paths denied (path-traversal fix)", () => {
     const profile = world.backend.generateProfile(world.context);
     const rootAllow = profile.indexOf(`(allow file-read* (subpath "/"))`);
-    const realHomeDeny = profile.indexOf(`(deny file-read-data (subpath "${world.realHome}"))`);
-    const runtimeDeny = profile.indexOf(`(deny file-read-data (subpath "${world.runtimeRoot}"))`);
+    // The profile emits canonical paths (realpathSync), but makeWorld hands us
+    // the symlink form (/var/...). Canonicalize before matching so the static
+    // assert checks the SAME string the profile actually emits. This is a test
+    // fix only -- it must NOT relax the deny policy itself.
+    const cRealHome = canonicalizePath(world.realHome);
+    const cRuntimeRoot = canonicalizePath(world.runtimeRoot);
+    const realHomeDeny = profile.indexOf(`(deny file-read-data (subpath "${cRealHome}"))`);
+    const runtimeDeny = profile.indexOf(`(deny file-read-data (subpath "${cRuntimeRoot}"))`);
     assert.ok(rootAllow >= 0, "profile must grant root read-traversal (fixes bootstrap SIGABRT)");
     // First-match-wins: the broad root allow must come AFTER the sensitive denies.
     assert.ok(realHomeDeny >= 0 && realHomeDeny < rootAllow, "real home must stay denied before root allow");

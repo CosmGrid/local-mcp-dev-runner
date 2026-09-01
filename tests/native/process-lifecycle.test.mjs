@@ -51,7 +51,7 @@ describe("P2 native process lifecycle and descendant reaping", () => {
     const code = [
       "process.stdout.write('STARTED;');",
       "const cp=require('child_process');",
-      "const child=cp.spawn(process.execPath,['-e','process.exit(0)'],[stdio:'ignore']);",
+      "const child=cp.spawn(process.execPath,['-e','process.exit(0)']," + JSON.stringify({ stdio: "ignore" }) + ");",
       "child.on('error',(e)=>{process.stdout.write('SPAWN_ERR:'+e.code);process.exit(7)});",
       "child.on('exit',(c)=>process.exit(c===0?0:6));"
     ].join("");
