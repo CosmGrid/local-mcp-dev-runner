@@ -84,4 +84,21 @@ describe("P2 native filesystem isolation", () => {
     assert.match(result.stdout, /DENIED/);
     assert.doesNotMatch(result.stdout, /LEAKED/);
   });
+
+  it("denies reading a sensitive path inside the real home (canonical realHome)", async () => {
+    // .bash_history is in DENIED_READ_FILES. Create it from the parent (outside
+    // the sandbox), then prove the sandboxed node cannot read it. With the
+    // profile now canonicalising realHome to /private/var/.../realhome, the
+    // deny rule actually matches the path the kernel evaluates (F2 fix).
+    const target = world.realHome + "/.bash_history";
+    await fs.writeFile(target, "HISTORY_SECRET", { mode: 0o600 });
+    const result = await runNode(
+      world,
+      `process.stdout.write('STARTED;');try{const d=require('fs').readFileSync(${JSON.stringify(target)},'utf8');process.stdout.write('LEAKED:'+d)}catch(e){process.stdout.write('DENIED')}`
+    );
+    assert.equal(result.exitCode, 0);
+    assert.match(result.stdout, /STARTED/, "target node must have started");
+    assert.match(result.stdout, /DENIED/);
+    assert.doesNotMatch(result.stdout, /LEAKED/);
+  });
 });

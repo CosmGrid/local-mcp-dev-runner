@@ -22,6 +22,7 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { realpathSync } from "node:fs";
 import { validateSExpression } from "./sandbox-backend.mjs";
 import { isProcessGroupAlive, runProcess } from "./sandbox-process-runner.mjs";
 
@@ -114,6 +115,30 @@ function sb(value) {
 /** Escape a literal path for use inside an SBPL regex filter. */
 function regexLiteral(value) {
   return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Resolve a path to its canonical (symlink-free) form before it enters an SBPL rule.
+ *
+ * macOS funnels several real locations behind symlinks: /tmp -> /private/tmp,
+ * /var -> /private/var. sandbox-exec matches rules against the *canonical* vnode
+ * path, so a rule built from the symlinked string (e.g. /var/folders/...) would
+ * never match the real /private/var/folders/... path the kernel evaluates --
+ * silently defeating both the allows (F3: the sandbox HOME ends up not writable)
+ * and the denies (F2: runtimeRoot / realHome leak). Canonicalising every dynamic
+ * path before it enters a rule closes that mismatch.
+ *
+ * Prefers realpathSync (resolves symlinks). For paths that do not exist yet
+ * (e.g. a worktree the caller will create next), it falls back to path.resolve so
+ * the rule is still absolute and deterministic.
+ */
+export function canonicalizePath(value) {
+  if (typeof value !== "string" || value.length === 0) return value;
+  try {
+    return realpathSync(value);
+  } catch {
+    return path.resolve(value);
+  }
 }
 
 function uniquePaths(values) {
@@ -250,22 +275,37 @@ export class SandboxExecBackend {
     assertAbsolute("homeRoot", homeRoot);
     assertAbsolute("tmpRoot", tmpRoot);
 
-    const parentsOfWorktree = uniquePaths(parentsOf(worktreeRoot, realHome));
-    const parentDirs = uniquePaths([...parentsOfWorktree, ...parentsOf(runtimeRoot ?? "", realHome)]);
-    const configDir = configFilePath ? path.dirname(configFilePath) : null;
+    // Canonicalise every dynamic path before it enters an SBPL rule. macOS hides
+    // real locations behind symlinks (/tmp -> /private/tmp, /var -> /private/var)
+    // and sandbox-exec matches rules against the canonical vnode path. A rule built
+    // from the symlinked string would never match the path the kernel evaluates.
+    const cWorktreeRoot = canonicalizePath(worktreeRoot);
+    const cHomeRoot = canonicalizePath(homeRoot);
+    const cTmpRoot = canonicalizePath(tmpRoot);
+    const cRealHome = realHome ? canonicalizePath(realHome) : null;
+    const cRuntimeRoot = runtimeRoot ? canonicalizePath(runtimeRoot) : null;
+    const cConfigDir = configFilePath ? canonicalizePath(path.dirname(configFilePath)) : null;
+    const cNodeBinDirs = nodeBinDirs.map(canonicalizePath);
+    const cExtraReadPaths = extraReadPaths.map(canonicalizePath);
+    const cExtraExecPaths = extraExecPaths.map(canonicalizePath);
+    const cExtraDenyReadPaths = extraDenyReadPaths.map(canonicalizePath);
+
+    const parentsOfWorktree = uniquePaths(parentsOf(cWorktreeRoot, cRealHome));
+    const parentDirs = uniquePaths([...parentsOfWorktree, ...parentsOf(cRuntimeRoot ?? "", cRealHome)]);
+    const configDir = cConfigDir;
 
     const readPaths = uniquePaths([
-      worktreeRoot,
-      homeRoot,
-      tmpRoot,
-      ...nodeBinDirs,
-      ...extraReadPaths,
+      cWorktreeRoot,
+      cHomeRoot,
+      cTmpRoot,
+      ...cNodeBinDirs,
+      ...cExtraReadPaths,
       ...SYSTEM_READ_PATHS
     ]);
 
-    const writePaths = uniquePaths([worktreeRoot, homeRoot, tmpRoot]);
+    const writePaths = uniquePaths([cWorktreeRoot, cHomeRoot, cTmpRoot]);
 
-    const execPaths = uniquePaths([...SYSTEM_EXEC_PATHS, ...nodeBinDirs, ...extraExecPaths]);
+    const execPaths = uniquePaths([...SYSTEM_EXEC_PATHS, ...cNodeBinDirs, ...cExtraExecPaths]);
 
     const lines = ["(version 1)", "(deny default)", ""];
 
@@ -290,6 +330,10 @@ export class SandboxExecBackend {
       lines.push(`(allow file-write* (subpath ${sb(dir)}))`);
       lines.push(`(allow file-read* (subpath ${sb(dir)}))`);
     }
+    // Node's child_process redirects stdio:'ignore' to /dev/null. Without a write
+    // allow here, spawning a child with stdio:'ignore' fails with EPERM. This is a
+    // single literal allow -- it must NOT be widened to /dev/* or any directory.
+    lines.push(`(allow file-write* (literal "/dev/null"))`);
     lines.push("");
 
     lines.push(";; ---- filesystem: denied -----------------------------------------");
@@ -302,23 +346,23 @@ export class SandboxExecBackend {
     for (const dir of parentDirs) {
       lines.push(`(deny file-read-data (regex #"^${regexLiteral(dir)}/[^/]+$"))`);
     }
-    if (realHome) {
+    if (cRealHome) {
       for (const name of DENIED_READ_DIRECTORIES) {
-        lines.push(`(deny file-read-data (subpath ${sb(path.join(realHome, name))}))`);
+        lines.push(`(deny file-read-data (subpath ${sb(path.join(cRealHome, name))}))`);
       }
       for (const name of DENIED_READ_FILES) {
-        lines.push(`(deny file-read-data (literal ${sb(path.join(realHome, name))}))`);
+        lines.push(`(deny file-read-data (literal ${sb(path.join(cRealHome, name))}))`);
       }
-      lines.push(`(deny file-read-data (subpath ${sb(path.join(realHome, "Library/Application Support/com.apple.TCC"))}))`);
-      lines.push(`(deny file-read-data (subpath ${sb(path.join(realHome, "Library/Keychains"))}))`);
+      lines.push(`(deny file-read-data (subpath ${sb(path.join(cRealHome, "Library/Application Support/com.apple.TCC"))}))`);
+      lines.push(`(deny file-read-data (subpath ${sb(path.join(cRealHome, "Library/Keychains"))}))`);
     }
     // The root read-allow below would otherwise make the real home readable
     // (it was only blocked before by the absence of any allow). Re-seal it
     // explicitly so the user's real HOME stays fully unreadable in the sandbox.
-    if (realHome) lines.push(`(deny file-read-data (subpath ${sb(realHome)}))`);
-    if (runtimeRoot) lines.push(`(deny file-read-data (subpath ${sb(runtimeRoot)}))`);
-    if (configDir) lines.push(`(deny file-read-data (subpath ${sb(configDir)}))`);
-    for (const dir of uniquePaths(extraDenyReadPaths)) {
+    if (cRealHome) lines.push(`(deny file-read-data (subpath ${sb(cRealHome)}))`);
+    if (cRuntimeRoot) lines.push(`(deny file-read-data (subpath ${sb(cRuntimeRoot)}))`);
+    if (cConfigDir) lines.push(`(deny file-read-data (subpath ${sb(cConfigDir)}))`);
+    for (const dir of cExtraDenyReadPaths) {
       lines.push(`(deny file-read-data (subpath ${sb(dir)}))`);
     }
     lines.push("");

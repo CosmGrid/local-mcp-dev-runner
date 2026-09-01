@@ -7,13 +7,16 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import path from "node:path";
+import { realpathSync } from "node:fs";
 import { validateSExpression, SANDBOX_BACKEND_CONTRACT } from "../../scripts/sandbox-backend.mjs";
 import {
   SandboxExecBackend,
   parentsOf,
   DENIED_EXECUTABLES,
   EXEC_RULE_ORDER,
-  DEFAULT_EXEC_RULE_ORDER
+  DEFAULT_EXEC_RULE_ORDER,
+  canonicalizePath
 } from "../../scripts/sandbox-backend-sandbox-exec.mjs";
 import { MockSandboxBackend } from "../../scripts/sandbox-backend-mock.mjs";
 
@@ -111,5 +114,26 @@ describe("MockSandboxBackend", () => {
   it("satisfies the backend contract", () => {
     const m = new MockSandboxBackend();
     for (const key of SANDBOX_BACKEND_CONTRACT) assert.ok(key in m, `mock must expose ${key}`);
+  });
+});
+
+describe("canonicalizePath", () => {
+  it("resolves an existing real path to its canonical (symlink-free) form", () => {
+    assert.equal(canonicalizePath(process.cwd()), realpathSync(process.cwd()));
+  });
+  it("resolves a known symlink (e.g. /tmp) to its real target", () => {
+    // On macOS /tmp -> /private/tmp; canonicalizePath must follow the symlink so
+    // SBPL rules match the path the kernel actually evaluates.
+    assert.equal(canonicalizePath("/tmp"), realpathSync("/tmp"));
+    assert.ok(path.isAbsolute(canonicalizePath("/tmp")));
+  });
+  it("falls back to path.resolve for a non-existent absolute path (no throw)", () => {
+    const missing = "/nonexistent-lmdr-xyz/abc";
+    assert.equal(canonicalizePath(missing), missing);
+    assert.ok(path.isAbsolute(canonicalizePath(missing)));
+  });
+  it("returns empty / non-string input unchanged", () => {
+    assert.equal(canonicalizePath(""), "");
+    assert.equal(canonicalizePath(null), null);
   });
 });

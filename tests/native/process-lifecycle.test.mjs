@@ -42,4 +42,22 @@ describe("P2 native process lifecycle and descendant reaping", () => {
       "the grandchild sleep must have been reaped together with the group"
     );
   });
+
+  it("spawns a child with stdio:'ignore' without EPERM (F4 /dev/null write allow)", async () => {
+    // The sandboxed node spawns a grandchild whose stdio is redirected to
+    // /dev/null. Without the (allow file-write* (literal "/dev/null")) rule the
+    // inner spawn fails with EPERM and never runs. Prove the grandchild starts
+    // and exits 0 (TARGET_RAN_AND_OPERATION_ALLOWED), not a spawn error.
+    const code = [
+      "process.stdout.write('STARTED;');",
+      "const cp=require('child_process');",
+      "const child=cp.spawn(process.execPath,['-e','process.exit(0)'],[stdio:'ignore']);",
+      "child.on('error',(e)=>{process.stdout.write('SPAWN_ERR:'+e.code);process.exit(7)});",
+      "child.on('exit',(c)=>process.exit(c===0?0:6));"
+    ].join("");
+    const result = await runNode(world, code, 15000);
+    assert.match(result.stdout, /STARTED/, "parent target must have started");
+    assert.equal(result.exitCode, 0, `stdio:'ignore' child must spawn and exit 0, stderr=${result.stderr}`);
+    assert.doesNotMatch(result.stdout, /SPAWN_ERR/, "inner spawn must not fail with EPERM");
+  });
 });
