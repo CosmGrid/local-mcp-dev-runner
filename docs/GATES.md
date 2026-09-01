@@ -14,7 +14,10 @@
 | `npm run gate:secret-scan` | 静态 | 待提交文件中有无密钥 / 绝对路径 / 用户名 | 快 |
 | `npm run gate:input-compat` | 静态/行为 | 与基线 `8137b48` 对比每个工具的 inputSchema 与名称，零变更才 PASS | 中 |
 | `npm run gate:schema` | 行为 | 运行 `tests/schema.test.mjs`：22/22 outputSchema 覆盖 + structuredContent 对照校验 | 中 |
-| `npm run gate:all` | 组合 | check → gate:security → gate:inventory → test → gate:input-compat → gate:schema → gate:secret-scan | 中 |
+| `npm run gate:p2-unit` | 静态/行为 | 运行 `tests/p2/*.test.mjs`：脚本策略 / 显式拒绝 / 沙箱环境 / 后端 profile / 进程 runner 源码不变量 / 审计日志 / 敏感 worktree 扫描（WorkBuddy 嵌套沙箱内可跑） | 中 |
+| `npm run gate:sandbox-real` | 真实沙箱 | `bash scripts/run-native-sandbox-gate.sh`：真实 macOS Seatbelt 隔离断言；**须原生 Terminal 跑**，嵌套沙箱内必 exit 71（fail-closed，不假 PASS） | 中 |
+| `npm run gate:p2-full` | 组合 | `gate:p2-unit` && `gate:sandbox-real` | 中 |
+| `npm run gate:all` | 组合 | check → gate:security → gate:inventory → test → gate:input-compat → gate:schema → gate:secret-scan → gate:p2-unit（**不含** gate:sandbox-real，因其须在原生 Terminal 跑） | 中 |
 | `npm run verify:runtime` | 只读校验 | 已部署 runtime 是否健康、是否与源码漂移 | 中 |
 
 ## 1. 语法门禁 `scripts/check-syntax.mjs`
@@ -87,6 +90,8 @@ WORKTREE_BASE = path.join(os.homedir(), ".local", "share", "local-mcp-dev-runner
 | `tests/security/run-script.test.mjs` | `run_script` 六种调用方式全部拒绝；`project_scripts` 报告执行已关闭 |
 | `tests/security/git-filter.test.mjs` | 全局装 LFS 但无 filter 规则 → 不阻断（3 个误报场景）；注释中的 filter → 不阻断；无害 attributes → 不阻断；仓库 `.gitattributes` / `core.attributesFile` / XDG attributes 含 filter → 阻断（3 个正向对照） |
 | `tests/schema.test.mjs` | 22/22 工具均声明 outputSchema（名称集合与基线精确一致、inputSchema 仍齐全）；真实调用文件写入链 / 只读路径 / git / worktree 链 / run_script DENY，将 `structuredContent` 对照其 `outputSchema` 做 JSON Schema 校验 |
+| `tests/p2/*.test.mjs` | P2 沙箱单元 / 镜像 / 静态门禁：脚本策略（detect / sha / evaluate / eligibility）、obvious-deny 分类、sandbox-env 隔离、SandboxExecBackend profile 生成、sandbox-process-runner 源码不变量（spawn 恰 2 处、无 shell、无 hardRlimit）、audit-log 元数据剥离、敏感 worktree 扫描（共 66 项，WorkBuddy 嵌套沙箱内可跑） |
+| `tests/native/*.test.mjs` | **仅可在原生 Terminal 跑**：真实 macOS Seatbelt 隔离断言（filesystem / environment / network / executables / process-lifecycle）；WorkBuddy 嵌套沙箱内 `sandbox-exec` 返回 exit 71，门禁 fail-closed |
 
 **测试不会做的事**：读写 `$HOME/.config/local-mcp-dev-runner/projects.json`；触碰任何真实业务仓库；启动 Tunnel；联网。
 

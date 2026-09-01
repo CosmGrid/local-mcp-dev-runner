@@ -43,6 +43,8 @@ package-lock.json
 
 **不会**被复制：`node_modules`（在 staging 里用 `npm ci` 重装）、`.git`、`tests/`、`scripts/`、`docs/`、`config/`、`*.bak-*`、任何 `.npmrc` 或凭据文件。
 
+> **P2 沙箱脚本同样不部署**：v2.0.0 新增的 `scripts/sandbox-*.mjs` 等沙箱执行脚本属于 `scripts/`，不进入部署产物。本阶段未触发 runtime 部署，线上 runner 仍是 v1.1.0，P2 沙箱为源码态能力，尚未上线（见 [docs/P2_PROCESS_SANDBOX_DESIGN.md](docs/P2_PROCESS_SANDBOX_DESIGN.md) 的 `RUNTIME_DEPLOYED=NO`）。
+
 ## 部署时保留了什么
 
 下列目录属于 runtime state，会被原样搬到新树上：

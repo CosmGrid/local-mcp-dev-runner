@@ -24,8 +24,10 @@
   "_fieldReference": {
     "root": "Absolute path to the project root. Must exist. Resolved with realpath before every operation.",
     "write": "false = READ_ONLY (default). true = READ_WRITE, still subject to branch and sensitivity rules.",
-    "runScripts": "Reserved for a future sandboxed execution profile. Always false in v1.0.",
-    "allowedScripts": "Reserved allowlist for a future sandboxed execution profile. Always empty in v1.0.",
+    "runScripts": "Whether sandboxed script execution is enabled for this project (v2.0.0+). When true, run_script may execute npm/pnpm scripts inside the macOS Seatbelt sandbox. Still subject to hash-pinning and obvious-deny. Default false.",
+    "allowedScripts": "Per-project allowlist of script NAMES permitted to run when runScripts is true (e.g. [\"build\",\"test\"]). install/ci/add and obvious-deny scripts are rejected regardless of this list. Default empty.",
+    "scriptHashes": "Optional. Map of scriptName -> expected sha256 of the script body. When present, run_script verifies the script-content hash before execution (TOCTOU layer C; distinct from the caller-supplied expectedPackageSha256 which covers the whole package).",
+    "packageManager": "Optional. Pin the package manager for this project: \"npm\" or \"pnpm\". When omitted, auto-detected from lockfile; any other manager (yarn/bun/npx) is rejected.",
     "managedWorktree": "Set automatically by git_worktree_create. Do not author this by hand.",
     "sourceProject": "Set automatically by git_worktree_create. Do not author this by hand.",
     "branch": "Set automatically by git_worktree_create. Do not author this by hand.",

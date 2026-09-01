@@ -6,6 +6,27 @@
 
 ---
 
+## [2.0.0] - Unreleased — Sandboxed run_script execution (P2 PROCESS SANDBOX)
+
+> **状态：源码完成，待原生沙箱门禁通过（`P2_IMPLEMENTATION=PASS_PENDING_NATIVE_GATE`）。本阶段不 deploy runtime，线上仍为 v1.1.0，沙箱能力为源码态、未进入部署产物。**
+
+将 `run_script` 从「永久 DENY」改造为在 macOS Seatbelt 进程沙箱内受控执行 npm / pnpm 脚本。
+
+### 新增
+- `scripts/sandbox-backend.mjs`、`scripts/sandbox-backend-sandbox-exec.mjs`、`scripts/sandbox-process-runner.mjs`、`scripts/script-policy.mjs`、`scripts/obvious-deny.mjs`、`scripts/output-handling.mjs`、`scripts/audit-log.mjs`、`scripts/sandbox-env.mjs`、`scripts/sandbox-runtime-paths.mjs`、`scripts/sensitive-worktree.mjs`、`scripts/sandbox-backend-mock.mjs`：沙箱执行全链路（后端抽象 / Seatbelt profile 生成 / 进程组生命周期 / 脚本策略 / 显式拒绝 / 审计日志 / 环境隔离 / 路径判定 / 敏感文件扫描 / 测试用 Mock 后端）
+- `scripts/run-native-sandbox-gate.sh`：真实 macOS Seatbelt 隔离的一键门禁（fail-closed；嵌套沙箱必 exit 71，不假 PASS）
+- `tests/p2/*.test.mjs`：P2 单元 / 镜像 / 静态门禁（66 项，WorkBuddy 嵌套沙箱内可跑）
+- `tests/native/*.test.mjs`：真实沙箱隔离断言（须原生 Terminal 跑）
+- `docs/P2_PROCESS_SANDBOX_DESIGN.md`：P2 冻结设计文档（design_version 1.1，含 C1 / C2 冲突裁定）
+
+### 约束（冻结，不可变）
+- 工具数仍 22；网络仅 none；仅 npm/pnpm；install DENY；无任意命令 API；仅 `mcp/*` worktree 可读写；脚本 allowlist + hash 钉死；TOCTOU A+B+C；不继承父环境；沙箱内无 git；无危险二进制；无 unsandboxed fallback；kill switch；无 hard RLIMIT；redaction 非安全边界。
+
+### 文档同步
+- README / SECURITY / ARCHITECTURE / GATES：`run_script` 由「永久关闭」改为「沙箱受控」
+
+---
+
 ## [1.1.0] - 2026-08-31 — Structured output schemas (A3 OUTPUT-SCHEMA)
 
 为全部 22 个 MCP 工具补充正式的、可验证的 `outputSchema` / 结构化输出契约（structured output contract），让 ChatGPT 等 MCP 客户端能可靠地以机器可解析的方式取得工具结果（成功字段、类型、数组元素结构、git / worktree / file 结果），而不必解析自由文本。

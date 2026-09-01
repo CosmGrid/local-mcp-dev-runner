@@ -29,11 +29,15 @@
 
 ## 2. 关于 run_script
 
-`run_script` 在 v1.0 中是 **永久关闭** 的：工具被注册（契约可见），但处理体第一行就无条件抛错。
+`run_script` 在 v1.0 / v1.1.0 中是 **永久关闭** 的：工具被注册（契约可见），但处理体第一行就无条件抛错。v2.0.0 起改为在 **macOS Seatbelt 进程沙箱**内受控执行——前置条件（OS 级隔离 + 按内容哈希的 allowlist）已满足，但被严格约束：
 
-这不是"暂时没做完"，而是一个明确的安全取舍。runner 运行在你的用户身份下，没有进程沙箱。开放"执行项目脚本"意味着仓库内容可以决定执行什么命令——而仓库内容恰恰是不可信输入的一部分。在这个前提下，任何 allowlist 都可以被改一行 `package.json` 绕开。
+- 仅 npm / pnpm，安装类子命令永久 DENY；
+- 包内容（`packageSha256`）与脚本内容（`scriptSha256`）双重钉死，执行前重读 `package.json` 防 TOCTOU，caller 可额外传 `expectedPackageSha256`；
+- 沙箱 deny-by-default：无网络、只写 per-run HOME/TMP、只可读 `mcp/*` worktree，真实 HOME / 系统目录 / 敏感文件全 seal；
+- 环境变量只透传显式 allowlist，绝不整体继承父进程环境；凭据形变量不进沙箱；
+- 无 shell、argv 结构化、stdio 全 pipe；`spawn` 调用点固定枚举为 2；超时整进程组回收；kill switch 双通道。
 
-重新开放的前置条件：真正的 OS 级隔离（容器 / seccomp / 独立低权限用户），加上按脚本内容哈希而非脚本名的 allowlist。详见 [README 第 11 节](README.md#11-为什么-run_script-默认关闭)。
+**真实隔离验证必须在原生 Terminal 跑**：WorkBuddy 嵌套沙箱下 `sandbox-exec` 返回 exit 71 是预期行为，门禁 fail-closed。详见 [README 第 11 节](README.md#11-run_script-现在是沙箱受控执行v2.0.0) 与 [docs/P2_PROCESS_SANDBOX_DESIGN.md](docs/P2_PROCESS_SANDBOX_DESIGN.md)。本阶段未部署 runtime，线上仍是 v1.1.0。
 
 ## 3. Git filter 的风险模型
 

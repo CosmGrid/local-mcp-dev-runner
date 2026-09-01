@@ -8,6 +8,12 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { createHash } from "node:crypto";
 
+// P2 — sandboxed run_script execution. All execution flows through a backend
+// that implements the SandboxBackend contract; there is no unsandboxed path.
+import { createBackend } from "./scripts/sandbox-backend.mjs";
+import { executeScript, killSwitchStatus, projectScriptReport } from "./scripts/script-execution.mjs";
+import { REASON } from "./scripts/script-policy.mjs";
+
 const CONFIG_FILE = path.join(os.homedir(), ".config", "local-mcp-dev-runner", "projects.json");
 const WORKTREE_BASE = path.join(os.homedir(), ".local", "share", "local-mcp-dev-runner", "worktrees");
 const MAX_FILE_BYTES = 200 * 1024;
@@ -155,8 +161,23 @@ async function resolveProject(projectName) {
     branch: raw.branch || null,
     protectedBranches: Array.isArray(raw.protectedBranches) ? raw.protectedBranches : [],
     runScripts: raw.runScripts === true,
-    allowedScripts: Array.isArray(raw.allowedScripts) ? raw.allowedScripts : []
+    allowedScripts: Array.isArray(raw.allowedScripts) ? raw.allowedScripts : [],
+    scriptHashes: raw.scriptHashes && typeof raw.scriptHashes === "object" ? { ...raw.scriptHashes } : {},
+    packageManager: typeof raw.packageManager === "string" ? raw.packageManager : null
   };
+}
+
+/**
+ * Lazily-constructed singleton sandbox backend. A3 runs in a nested sandbox
+ * (WorkBuddy) where /usr/bin/sandbox-exec returns EPERM 71; in that environment
+ * the backend reports itself unavailable and run_script refuses rather than
+ * degrading to an unsandboxed execution. Real sandbox verification happens in a
+ * native macOS Terminal.app via scripts/run-native-sandbox-gate.sh.
+ */
+let sandboxBackend = null;
+function getSandboxBackend() {
+  if (!sandboxBackend) sandboxBackend = createBackend();
+  return sandboxBackend;
 }
 
 async function resolveInsideProject(projectName, requestedPath = ".") {
@@ -679,41 +700,31 @@ async function searchText(projectName, requestedPath, query, caseSensitive, maxR
 
 async function packageScriptsFor(projectName) {
   const project = await resolveProject(projectName);
-  let parsed;
-  try {
-    const packageFile = await readTextFile(projectName, "package.json", MAX_FILE_BYTES);
-    parsed = JSON.parse(packageFile.content);
-  } catch (error) {
-    if (String(error?.message || error).includes("Path does not exist: package.json")) {
-      return { project: projectName, packageManager: null, scripts: [], executionEnabled: false };
-    }
-    throw error;
-  }
+  const backend = getSandboxBackend();
+  const killSwitch = await killSwitchStatus();
+  const report = await projectScriptReport({ spec: project, backend, killSwitch });
 
-  let packageManager = null;
-  if (typeof parsed.packageManager === "string") {
-    packageManager = parsed.packageManager.split("@")[0];
-  } else if (await pathExists(path.join(project.root, "pnpm-lock.yaml"))) {
-    packageManager = "pnpm";
-  } else if (await pathExists(path.join(project.root, "yarn.lock"))) {
-    packageManager = "yarn";
-  } else if (await pathExists(path.join(project.root, "package-lock.json"))) {
-    packageManager = "npm";
-  }
-
+  // Preserve the v1.0 contract fields, then append the P2 additions (design §5).
   return {
-    project: projectName,
-    packageManager,
-    scripts: Object.keys(parsed.scripts || {}).sort(),
-    allowedScripts: project.allowedScripts,
-    executionEnabled: false,
-    reason: "run_script is intentionally disabled in v1.0 until an OS/process sandbox is added"
+    project: report.project,
+    packageManager: report.packageManager,
+    scripts: report.scripts,
+    allowedScripts: report.allowedScripts,
+    executionEnabled: report.executionEnabled,
+    reason: report.reason,
+    packageSha256: report.packageSha256,
+    deniedScripts: report.deniedScripts,
+    executionSupported: report.executionSupported,
+    killSwitchActive: report.killSwitchActive,
+    scriptHashes: report.scriptHashes,
+    hashMatches: report.hashMatches,
+    sensitiveFilesInWorktree: report.sensitiveFilesInWorktree
   };
 }
 
 const server = new McpServer({
   name: "local-mcp-dev-runner",
-  version: "1.0.0"
+  version: "2.0.0"
 });
 
 server.registerTool(
@@ -1424,16 +1435,27 @@ server.registerTool(
   "project_scripts",
   {
     title: "List project scripts",
-    description: "List package.json scripts and show that execution is disabled in the v1.0 security profile.",
+    description:
+      "List package.json scripts and report whether sandboxed execution is supported for this project. " +
+      "executionSupported answers 'can this environment run scripts at all'; executionEnabled folds in the kill switch.",
     inputSchema: z.object({ project: z.string().min(1) }),
-    outputSchema: z.object({
-      project: z.string(),
-      packageManager: z.string().nullable(),
-      scripts: z.array(z.string()),
-      allowedScripts: z.array(z.string()).optional(),
-      executionEnabled: z.boolean(),
-      reason: z.string().optional()
-    })
+    outputSchema: z
+      .object({
+        project: z.string(),
+        packageManager: z.string().nullable(),
+        scripts: z.array(z.string()),
+        allowedScripts: z.array(z.string()).optional(),
+        executionEnabled: z.boolean(),
+        reason: z.string().nullable().optional(),
+        packageSha256: z.string().nullable(),
+        deniedScripts: z.array(z.any()),
+        executionSupported: z.boolean(),
+        killSwitchActive: z.boolean(),
+        scriptHashes: z.record(z.string(), z.string()),
+        hashMatches: z.boolean(),
+        sensitiveFilesInWorktree: z.array(z.string())
+      })
+      .strict()
   },
   async ({ project }) => structured(await packageScriptsFor(project))
 );
@@ -1442,22 +1464,107 @@ server.registerTool(
   "run_script",
   {
     title: "Run project script",
-    description: "Reserved interface for future sandboxed test/build execution. v1.0 always denies execution.",
-    inputSchema: z.object({
-      project: z.string().min(1),
-      script: z.string().min(1)
-    }),
-    outputSchema: z.object({
-      project: z.string(),
-      script: z.string(),
-      exitCode: z.number().int(),
-      stdout: z.string(),
-      stderr: z.string()
-    })
+    description:
+      "Execute an allowlisted, hash-pinned npm/pnpm script inside a macOS Seatbelt sandbox. " +
+      "network is always 'none'; script execution is confined to a runner-managed READ_WRITE mcp/* worktree. " +
+      "A non-zero script exit code is a successful MCP call (the script ran; the test failed).",
+    inputSchema: z
+      .object({
+        project: z.string().min(1),
+        script: z.string().min(1),
+        expectedPackageSha256: z.string().regex(/^[0-9a-f]{64}$/i).optional(),
+        network: z.string().optional(),
+        timeoutSeconds: z.number().int().min(1).max(600).optional()
+      })
+      .strict(),
+    outputSchema: z
+      .object({
+        project: z.string(),
+        script: z.string(),
+        packageManager: z.string(),
+        packageSha256: z.string(),
+        scriptSha256: z.string(),
+        network: z.literal("none"),
+        startedAt: z.string(),
+        endedAt: z.string(),
+        durationMs: z.number().int(),
+        exitCode: z.number().int().nullable(),
+        signal: z.string().nullable(),
+        timedOut: z.boolean(),
+        cancelled: z.boolean(),
+        stdout: z.string(),
+        stderr: z.string(),
+        stdoutTruncated: z.boolean(),
+        stderrTruncated: z.boolean(),
+        decision: z.string(),
+        reason: z.string().nullable(),
+        timeoutSeconds: z.number().int(),
+        descendantsRemaining: z.boolean(),
+        descendantState: z.string()
+      })
+      .strict()
   },
-  async ({ project }) => {
-    await resolveProject(project);
-    throw new Error("run_script is disabled in v1.0 security profile until an OS/process sandbox is added");
+  async ({ project, script, expectedPackageSha256 = null, network = "none", timeoutSeconds = null }) => {
+    // P2 safety invariant: a denial or an unavailable backend is the only outcome.
+    // zero arbitrary shell API: the input schema is strict() and rejects any
+    // command/args/shell/exec/cwd/env/binary/executable field. There is
+    // deliberately no unsandboxed fallback path — executeScript refuses when the
+    // backend cannot enforce the sandbox instead of degrading to a bare spawn.
+    if (network !== "none") {
+      throw new Error(
+        `${REASON.NETWORK_NOT_NONE}: network access is never granted (received ${JSON.stringify(network)})`
+      );
+    }
+
+    const spec = await resolveProject(project);
+    const gitState = await getGitState(spec).catch(() => null);
+    const result = await executeScript({
+      spec,
+      gitState,
+      script,
+      expectedPackageSha256,
+      network,
+      timeoutSeconds,
+      backend: getSandboxBackend()
+    });
+
+    if (result.isError) {
+      const detail = result.detail != null ? `: ${JSON.stringify(result.detail)}` : "";
+      throw new Error(`${result.decision}${detail}`);
+    }
+
+    const payload = {
+      project: result.project,
+      script: result.script,
+      packageManager: result.packageManager,
+      packageSha256: result.packageSha256,
+      scriptSha256: result.scriptSha256,
+      network: result.network,
+      startedAt: result.startedAt,
+      endedAt: result.endedAt,
+      durationMs: result.durationMs,
+      exitCode: result.exitCode,
+      signal: result.signal,
+      timedOut: result.timedOut,
+      cancelled: result.cancelled,
+      stdout: result.stdout,
+      stderr: result.stderr,
+      stdoutTruncated: result.stdoutTruncated,
+      stderrTruncated: result.stderrTruncated,
+      decision: result.decision,
+      reason: result.timedOut ? "TIMEOUT" : result.cancelled ? "CANCELLED" : null,
+      timeoutSeconds: result.timeoutSeconds,
+      descendantsRemaining: result.descendantsRemaining,
+      descendantState: result.descendantState
+    };
+
+    const summary =
+      `run_script ${result.project}/${result.script} ` +
+      `decision=${result.decision} exitCode=${String(result.exitCode)} durationMs=${result.durationMs}\n` +
+      `stdout:${result.stdoutTruncated ? "[truncated] " : " "}${result.stdout}\n` +
+      `stderr:${result.stderrTruncated ? "[truncated] " : " "}${result.stderr}`;
+
+    return structured(payload, summary);
   }
 );
 

@@ -1,7 +1,7 @@
 {
   "name": "local-mcp-dev-runner",
-  "version": "1.1.0",
-  "description": "Local MCP dev runner: read-mostly access to registered local repositories over a stdio MCP server, with a runner-managed git worktree as the only writable surface.",
+  "version": "2.0.0",
+  "description": "Local MCP dev runner: read-mostly access to registered local repositories over a stdio MCP server, with a runner-managed git worktree as the only writable surface. v2.0.0 adds sandboxed run_script execution (npm/pnpm, hash-pinned, macOS Seatbelt).",
   "private": true,
   "license": "UNLICENSED",
   "type": "module",
@@ -12,15 +12,20 @@
   "scripts": {
     "start": "node server.mjs",
     "check": "node scripts/check-syntax.mjs",
-    "test": "node --test --test-concurrency=4 tests/*.test.mjs tests/security/*.test.mjs",
+    "test": "node --test --test-concurrency=4 tests/*.test.mjs tests/security/*.test.mjs tests/p2/*.test.mjs",
     "test:inventory": "node --test tests/inventory.test.mjs",
     "test:security": "node --test --test-concurrency=4 tests/security/*.test.mjs",
+    "test:p2": "node --test --test-concurrency=4 tests/p2/*.test.mjs",
     "gate:security": "node scripts/check-security-policies.mjs",
     "gate:inventory": "node scripts/check-inventory.mjs",
     "gate:secret-scan": "bash scripts/secret-scan.sh",
     "gate:input-compat": "node scripts/check-input-compat.mjs",
     "gate:schema": "node --test tests/schema.test.mjs",
-    "gate:all": "npm run check && npm run gate:security && npm run gate:inventory && npm run test && npm run gate:input-compat && npm run gate:schema && npm run gate:secret-scan",
+    "gate:p2-unit": "node --test --test-concurrency=4 tests/p2/*.test.mjs",
+    "gate:sandbox-real": "bash scripts/run-native-sandbox-gate.sh",
+    "gate:p2-full": "npm run gate:p2-unit && npm run gate:sandbox-real",
+    "gate:all": "npm run check && npm run gate:security && npm run gate:inventory && npm run test && npm run gate:input-compat && npm run gate:schema && npm run gate:secret-scan && npm run gate:p2-unit",
+    "gate:all:partial": "npm run gate:all",
     "verify:runtime": "bash scripts/verify-runtime.sh"
   },
   "dependencies": {

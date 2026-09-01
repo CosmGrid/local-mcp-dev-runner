@@ -119,7 +119,7 @@ WORKTREE_BASE  = $HOME/.local/share/local-mcp-dev-runner/worktrees
 
 - `structuredContent` 的字段与 `outputSchema` 严格对应，且 `additionalProperties: false`，所以客户端可以稳定地按字段名取值，而不必解析自由文本。
 - 错误处理路径（`isError: true` 或抛出异常）不携带 `structuredContent`，沿用原有的文本错误消息，符合 MCP 协议语义。
-- `run_script` 在 v1.0 / v1.1.0 中仍是无条件拒绝，其 `outputSchema` 仅为契约占位，运行时不可达。
+- `run_script` 自 v2.0.0 起在 macOS Seatbelt 沙箱内可达（仅 npm/pnpm、hash 钉死、无网络），其 `outputSchema` 仍是契约占位但运行时可执行；设计权威与冻结约束见 [docs/P2_PROCESS_SANDBOX_DESIGN.md](docs/P2_PROCESS_SANDBOX_DESIGN.md)。
 - 输入契约（`inputSchema`）零变更：本工作包只新增输出侧契约，未触碰任何工具参数。输入兼容性由 `npm run gate:input-compat` 守护（与基线 commit `8137b48` 逐字段对比）。
 
 相关测试见 `tests/schema.test.mjs`：既验证 22/22 工具都声明了 `outputSchema`，也用真实工具调用把 `structuredContent` 对照其声明的 `outputSchema` 做 JSON Schema 校验。

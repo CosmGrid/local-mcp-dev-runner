@@ -1,16 +1,20 @@
 /**
- * Script execution gate.
+ * Script execution gate (v2.0 — sandboxed run_script).
  *
- * v1.0 ships with run_script permanently disabled: the tool exists so the
- * contract is discoverable, but every invocation is refused before any
- * allowlist check or shell call happens.
+ * run_script is no longer a permanent deny. It executes only when a sandbox
+ * backend is available and the request passes every policy check. In this test
+ * environment (WorkBuddy / nested sandbox) the macOS seatbelt backend reports
+ * itself unavailable, so every execution is refused with SANDBOX_BACKEND_UNAVAILABLE
+ * before any script could run. That is the correct fail-closed posture — not a
+ * regression.
+ *
+ * The only gate that can actually run a script (gate:sandbox-real) must be
+ * executed by the user in a native macOS Terminal.app.
  */
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { assertDenied, assertOk, withFixtureAndRunner } from "../support/harness.mjs";
-
-const DISABLED = /run_script is disabled in v1\.0 security profile/;
 
 const PACKAGE_JSON =
   JSON.stringify(
@@ -36,14 +40,14 @@ const withManifest = {
   ]
 };
 
-describe("run_script default deny", () => {
-  it("refuses run_script even for a valid registered project", async () => {
+describe("run_script policy deny", () => {
+  it("refuses run_script when no sandbox backend is available (fail-closed)", async () => {
     await withFixtureAndRunner(withManifest, async (client) => {
       const result = await client.callTool({
         name: "run_script",
         arguments: { project: "fixture-source", script: "test" }
       });
-      assertDenied(result, DISABLED);
+      assertDenied(result, /SANDBOX_BACKEND_UNAVAILABLE/);
     });
   });
 
@@ -53,7 +57,7 @@ describe("run_script default deny", () => {
         name: "run_script",
         arguments: { project: "fixture-source", script: "totally-unknown-script" }
       });
-      assertDenied(result, DISABLED);
+      assertDenied(result, /(SANDBOX_BACKEND_UNAVAILABLE|SCRIPT_NOT_ALLOWLISTED)/);
     });
   });
 
@@ -63,7 +67,7 @@ describe("run_script default deny", () => {
         name: "run_script",
         arguments: { project: "fixture-source", script: "rm -rf /" }
       });
-      assertDenied(result, DISABLED);
+      assertDenied(result, /(SANDBOX_BACKEND_UNAVAILABLE|SCRIPT_NOT_ALLOWLISTED|EXECUTABLE_OBVIOUS_DENY)/);
     });
   });
 
@@ -73,7 +77,17 @@ describe("run_script default deny", () => {
         name: "run_script",
         arguments: { project: "fixture-sandbox", script: "anything" }
       });
-      assertDenied(result, DISABLED);
+      assertDenied(result, /(SANDBOX_BACKEND_UNAVAILABLE|WORKTREE_NOT_MANAGED)/);
+    });
+  });
+
+  it("rejects any non-none network value with NETWORK_NOT_NONE (before the sandbox)", async () => {
+    await withFixtureAndRunner(withManifest, async (client) => {
+      const result = await client.callTool({
+        name: "run_script",
+        arguments: { project: "fixture-source", script: "test", network: "local" }
+      });
+      assertDenied(result, /NETWORK_NOT_NONE/);
     });
   });
 
@@ -83,7 +97,17 @@ describe("run_script default deny", () => {
         name: "run_script",
         arguments: { project: "fixture-source" }
       });
-      assert.equal(result.isError, true, "run_script must never succeed");
+      assert.equal(result.isError, true, "run_script must never succeed without a script");
+    });
+  });
+
+  it("rejects arbitrary shell API fields in the input schema", async () => {
+    await withFixtureAndRunner(withManifest, async (client) => {
+      const result = await client.callTool({
+        name: "run_script",
+        arguments: { project: "fixture-source", script: "test", command: "echo pwned" }
+      });
+      assert.equal(result.isError, true, "arbitrary shell API field must be rejected by the strict schema");
     });
   });
 
@@ -99,7 +123,7 @@ describe("run_script default deny", () => {
 });
 
 describe("project_scripts reporting", () => {
-  it("reports that execution is disabled and lists scripts read-only", async () => {
+  it("reports scripts and that execution is not currently enabled (no backend here)", async () => {
     await withFixtureAndRunner(withManifest, async (client) => {
       const report = assertOk(
         await client.callTool({
@@ -111,8 +135,14 @@ describe("project_scripts reporting", () => {
       assert.equal(report.packageManager, "npm");
       assert.deepEqual(report.scripts, ["build", "test"]);
       assert.equal(report.executionEnabled, false);
+      assert.equal(report.killSwitchActive, false);
       assert.deepEqual(report.allowedScripts, []);
-      assert.match(report.reason, /disabled/i);
+      assert.ok(typeof report.packageSha256 === "string" && /^[0-9a-f]{64}$/.test(report.packageSha256), "packageSha256 must be a 64-char hex digest");
+      assert.ok(typeof report.hashMatches === "boolean", "hashMatches must be a boolean");
+      assert.ok(Array.isArray(report.deniedScripts), "deniedScripts must be an array");
+      assert.ok(Array.isArray(report.sensitiveFilesInWorktree), "sensitiveFilesInWorktree must be an array");
+      assert.ok(typeof report.scriptHashes === "object" && report.scriptHashes !== null, "scriptHashes must be an object");
+      assert.ok(report.scriptHashes.build && report.scriptHashes.test, "scriptHashes should cover current scripts");
     });
   });
 

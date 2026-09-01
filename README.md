@@ -18,7 +18,7 @@
 | 只读 Git | `git_status`、`git_diff`、`git_log`、`git_branch_list` |
 | 受控分支与工作区 | `git_create_branch`、`git_worktree_create`、`git_worktree_remove` |
 | 受控提交 | `git_commit` |
-| 脚本（**永久关闭**） | `project_scripts`、`run_script` |
+| 脚本（**沙箱受控 · v2.0.0**） | `project_scripts`、`run_script`（仅 npm/pnpm，hash 钉死，macOS Seatbelt 沙箱） |
 
 > **结构化输出（v1.1.0 新增）**：每个工具现在都声明了 `outputSchema`，成功返回在原有文本 `content` 之外还携带机器可解析的 `structuredContent`，MCP 客户端（ChatGPT 等）可以稳定地按字段名取值，而不必解析自由文本。输入契约（`inputSchema`）零变更。
 
@@ -29,7 +29,7 @@
 - **代码不出本机。** 模型只能拿到你允许它拿到的那部分文本。
 - **默认只读。** 原仓库一律 `write: false`。
 - **要写就写到别处。** 唯一可写的目标是 runner 自己创建并登记的 git worktree。
-- **不给 shell。** `run_script` 在 v1.0 里被硬编码关闭，见下。
+- **执行受沙箱约束。** `run_script` 自 v2.0.0 起在 macOS Seatbelt 沙箱内受控执行（仅 npm/pnpm、hash 钉死、无网络、无 shell 逃逸），详见第 11 节与 [docs/P2_PROCESS_SANDBOX_DESIGN.md](docs/P2_PROCESS_SANDBOX_DESIGN.md)。
 
 ## 3. 架构
 
@@ -134,14 +134,17 @@ RUNTIME_ROOT $HOME/.local/share/local-mcp-dev-runner   ← 部署目标，勿手
 
 ```bash
 npm run check           # 语法门禁：全量 .mjs 解析
-npm test                # 全部测试（当前 70 项：64 行为 + 6 输出 schema）
+npm test                # 全部测试（tests/ + tests/security/ + tests/p2/；P2 真实沙箱用例在 tests/native/，须原生 Terminal 跑）
 npm run test:security   # 仅安全套件
 npm run test:inventory  # 仅工具清单
 npm run gate:security   # 静态安全策略门禁（守卫是否仍存在于源码）
 npm run gate:input-compat  # 输入契约 vs 基线 8137b48 零变更
 npm run gate:schema        # 22/22 outputSchema 覆盖 + structuredContent 校验
 npm run gate:secret-scan
-npm run gate:all        # 以上全部
+npm run gate:p2-unit     # P2 单元/镜像/静态门禁（tests/p2，WorkBuddy 嵌套沙箱内可跑）
+npm run gate:sandbox-real # 真实 macOS Seatbelt 沙箱门禁（须在原生 Terminal 跑，嵌套沙箱必 exit 71）
+npm run gate:p2-full     # gate:p2-unit && gate:sandbox-real
+npm run gate:all        # 以上静态/行为门禁（含 gate:p2-unit，不含 gate:sandbox-real）
 npm run verify:runtime  # 校验已部署的 runtime（只读）
 ```
 
@@ -168,20 +171,24 @@ npm run verify:runtime  # 校验已部署的 runtime（只读）
 - **提交不做签名。** 强制 `commit.gpgSign=false`。
 - **无并发协调。** SHA 校验是乐观锁，不是事务。
 
-## 11. 为什么 `run_script` 默认关闭
+## 11. `run_script` 现在是沙箱受控执行（v2.0.0）
 
-`run_script` 存在的意义是保留接口契约，让人能从 `project_scripts` 看到项目有哪些脚本。但它的实现体第一行就是无条件抛错：
+`run_script` 在 v1.0 / v1.1.0 里是永久关闭的：接口契约可见，但处理体第一行无条件抛错。v2.0.0 把它改造成在 **macOS Seatbelt（`sandbox-exec`）进程沙箱**内受控执行 npm / pnpm 脚本，而不是简单地打开开关。
 
-```js
-async ({ project }) => {
-  await resolveProject(project);
-  throw new Error("run_script is disabled in v1.0 security profile until an OS/process sandbox is added");
-}
+开放的前提条件已被满足，但被严格约束：
+
+- **只跑 npm / pnpm。** yarn / bun / npx 一律拒绝；`install` / `ci` / `add` 等安装类子命令永久 DENY——沙箱无网络，安装毫无意义，且会从远端拉取不可信代码。
+- **hash 钉死。** 包内容（`packageSha256`）与脚本内容（`scriptSha256`）双重校验，执行前重读 `package.json` 防 TOCTOU；caller 还可额外传 `expectedPackageSha256` 做第三层校验。改一行 `package.json` 即 hash 失效、拒绝执行——这正是 v1.0 担心的「改一行绕开 allowlist」被结构性堵死。
+- **OS 级隔离。** 沙箱 deny-by-default：无网络、只写 per-run HOME/TMP、只可读 runner 管理的 `mcp/*` worktree；真实 HOME / 系统目录 / 敏感文件全 seal。环境变量只透传显式 allowlist，绝不整体继承父进程环境；凭据形变量（如 `MY_API_TOKEN`、`AWS_SECRET_ACCESS_KEY`）不进沙箱。
+- **无逃逸。** 无 shell、argv 结构化、stdio 全 pipe；`spawn` 调用点固定枚举为 2（主子进程 + `pgrep` 后代发现）；超时即 SIGTERM→SIGKILL 整进程组回收；kill switch 双通道（文件 + 环境变量）。
+
+**真实的隔离验证必须在原生 Terminal 跑**：WorkBuddy 本身已是嵌套沙箱，`sandbox-exec` 会返回 `Operation not permitted`（exit 71），这是预期行为，门禁会 fail-closed 而非假 PASS。请在本机 Terminal.app 执行：
+
+```bash
+cd /path/to/local-mcp-dev-runner && bash scripts/run-native-sandbox-gate.sh
 ```
 
-理由很直接：**这个 runner 没有任何进程级沙箱。** 它跑在你的用户身份下，能读你所有的 SSH key、浏览器 cookie 和云凭据。一旦开放"按项目 package.json 里的名字执行脚本"，攻击者只需要往仓库里塞一个 `postinstall` 或改一行 `scripts.test`，就能把"执行测试"变成"执行任意命令"。allowlist 也挡不住这种攻击，因为脚本内容是仓库的一部分，而仓库内容正是被操纵的对象。
-
-所以 v1.0 的选择是：宁可没有这个能力，也不给一条绕过路径。将来要开放，前置条件是引入真正的 OS 级隔离（容器 / seccomp / 独立低权限用户），再按脚本内容哈希做 allowlist。在此之前，这个开关不应被打开。
+设计权威与全部冻结约束见 [docs/P2_PROCESS_SANDBOX_DESIGN.md](docs/P2_PROCESS_SANDBOX_DESIGN.md)。注意：**本阶段未触发 runtime 部署**，线上 runner 仍停留在 v1.1.0；P2 沙箱目前是随源码提交的能力，尚未进入部署产物。
 
 ## 12. 许可与状态
 
