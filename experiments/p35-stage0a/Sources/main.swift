@@ -68,6 +68,9 @@ guard FileManager.default.fileExists(atPath: initrdURL.path) else {
 func buildConfig() -> VZVirtualMachineConfiguration {
     let config = VZVirtualMachineConfiguration()
 
+    // VZLinuxBootLoader requires a VZGenericPlatformConfiguration.
+    config.platform = VZGenericPlatformConfiguration()
+
     // x86_64 Linux boot via Virtualization.framework.
     // VZLinuxBootLoader(kernelURL:) + .commandLine / .initrdURL properties.
     let bootLoader = VZLinuxBootLoader(kernelURL: kernelURL)
@@ -88,6 +91,9 @@ func buildConfig() -> VZVirtualMachineConfiguration {
 
     // One virtio console so the guest's console=hvc0 has a device.
     let console = VZVirtioConsoleDeviceConfiguration()
+    let consolePort = VZVirtioConsolePortConfiguration()
+    consolePort.isConsole = true
+    console.ports[0] = consolePort
     config.consoleDevices = [console]
 
     return config
