@@ -1,0 +1,19 @@
+{
+  "note": "Stage 0B reuses the verified Stage 0A Linux boot assets (Alpine virt x86_64).",
+  "kernel": {
+    "file": "vmlinuz-virt",
+    "source": "Alpine virt 3.21.3 x86_64 ISO",
+    "expectedPath": "/tmp/lmdr-p35-stage0a-assets/vmlinuz-virt"
+  },
+  "initramfs": {
+    "file": "initramfs-virt",
+    "source": "Alpine virt 3.21.3 x86_64 ISO",
+    "expectedPath": "/tmp/lmdr-p35-stage0a-assets/initramfs-virt",
+    "isoSha256": "f28171c35bbf623aa3cbaec4b8b29297f13095b892c1a283b15970f7eb490f2d",
+    "reusedFor": "Stage 0B: unpack, preserve /init, add /stage0b-init via rdinit"
+  },
+  "iso": {
+    "file": "alpine-virt-3.21.3-x86_64.iso",
+    "sha256": "f28171c35bbf623aa3cbaec4b8b29297f13095b892c1a283b15970f7eb490f2d"
+  }
+}

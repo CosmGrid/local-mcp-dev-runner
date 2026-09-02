@@ -1,0 +1,9 @@
+# Stage 0B build artifacts
+.build/
+*.o
+
+# Never commit temp host trees (only /tmp at runtime, not here)
+/tmp/
+
+# Local asset cache pointers (assets live in /tmp, not in repo)
+*.lock.local

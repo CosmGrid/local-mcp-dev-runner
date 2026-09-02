@@ -1,0 +1,158 @@
+#!/bin/sh
+# Stage 0B VirtioFS isolation guest probe.
+#
+# Runs as PID 1 inside the Alpine initramfs (kernel cmdline rdinit=/stage0b-init).
+# It does NOT replace Alpine's /init; it is an ADDITIONAL early-userspace init
+# selected by the kernel's rdinit= parameter. Original /init stays intact.
+#
+# What it does:
+#   1. mount VirtioFS share "lmdr-stage0b" at /worktree (try modprobe virtiofs once)
+#   2. IO gate: read host-supplied marker, write a guest marker back to the share
+#   3. Path-escape gate: dotdot, relative symlink, absolute symlink, absolute host path
+#   4. Host HOME exposure check (/Users presence in guest namespace)
+#   5. Network device check (only loopback allowed)
+#   6. write structured results to /worktree/guest-results.txt + sync
+#   7. idle so the host controls VM stop
+#
+# All markers are FAKE random strings (no real secrets). The guest reads
+# /worktree/probe-spec.sh (written by the host into the allowed share) to learn
+# the denied-sentinel secret value + the exact traversal target paths.
+set +e
+
+# --- minimal early-userspace environment (busybox) ---
+mount -t proc proc /proc 2>/dev/null
+mount -t sysfs sysfs /sys 2>/dev/null
+mount -t devtmpfs devtmpfs /dev 2>/dev/null
+mkdir -p /worktree /tmp
+
+R=/worktree/guest-results.txt
+echo "STAGE0B_GUEST_INIT_START=$(date -u +%s)" > "$R"
+
+log() { echo "$*"; }
+
+# The shared directory must already be mounted; if not, nothing else works.
+modprobe virtiofs 2>/dev/null
+if mount -t virtiofs lmdr-stage0b /worktree 2>/dev/null; then
+  VIRTIOFS_MOUNT=PASS
+else
+  VIRTIOFS_MOUNT=FAIL
+fi
+
+# Guest support = kernel exposes the virtiofs fstype (modprobe recognized it)
+# AND the mount actually landed (tag visible in /proc/mounts).
+if grep -q "lmdr-stage0b" /proc/mounts 2>/dev/null; then
+  VIRTIOFS_GUEST_SUPPORT=PASS
+else
+  VIRTIOFS_GUEST_SUPPORT=FAIL
+fi
+echo "VIRTIOFS_GUEST_SUPPORT=$VIRTIOFS_GUEST_SUPPORT" >> "$R"
+echo "VIRTIOFS_MOUNT=$VIRTIOFS_MOUNT" >> "$R"
+log "virtiofs: support=$VIRTIOFS_GUEST_SUPPORT mount=$VIRTIOFS_MOUNT"
+
+if [ "$VIRTIOFS_MOUNT" != "PASS" ]; then
+  # Cannot exercise the share -> report gates as INCONCLUSIVE (no data).
+  echo "GUEST_READ_HOST_MARKER=" >> "$R"
+  echo "GUEST_WRITE_MARKER=" >> "$R"
+  echo "DOTDOT_ESCAPE=INCONCLUSIVE" >> "$R"
+  echo "SYMLINK_ESCAPE_REL=INCONCLUSIVE" >> "$R"
+  echo "SYMLINK_ESCAPE_ABS=INCONCLUSIVE" >> "$R"
+  echo "ABSOLUTE_PATH_ESCAPE=INCONCLUSIVE" >> "$R"
+  echo "HOST_HOME_EXPOSED_TO_GUEST=UNKNOWN" >> "$R"
+  echo "GUEST_HAS_VIRTIO_NET=UNKNOWN" >> "$R"
+  echo "GUEST_INTERFACES=" >> "$R"
+  echo "STAGE0B_GUEST_DONE=1" >> "$R"
+  sync 2>/dev/null
+  # idle so the host can stop the VM cleanly
+  while true; do sleep 3600; done
+fi
+
+# --- load the probe spec the host placed in the allowed share ---
+SECRET=""
+DOTDOT=""
+SYMLINK_REL=""
+SYMLINK_ABS=""
+ABS_PATH=""
+if [ -f /worktree/probe-spec.sh ]; then
+  . /worktree/probe-spec.sh
+fi
+[ -z "$SECRET" ] && SECRET="LMDR_STAGE0B_DENIED_UNSET"
+
+# --- IO gate ---
+HOST_MARKER_FILE=/worktree/host-read.txt
+GUEST_READ_VAL=$(cat "$HOST_MARKER_FILE" 2>/dev/null)
+echo "GUEST_READ_HOST_MARKER=$GUEST_READ_VAL" >> "$R"
+log "io read: got='$GUEST_READ_VAL'"
+
+GUEST_WRITE_MARKER="LMDR_STAGE0B_GUESTWRITE_$(head -c 8 /dev/urandom 2>/dev/null | od -An -tx1 | tr -d ' \n')"
+echo "$GUEST_WRITE_MARKER" > /worktree/guest-write.txt 2>/dev/null
+echo "GUEST_WRITE_MARKER=$GUEST_WRITE_MARKER" >> "$R"
+log "io write: marker='$GUEST_WRITE_MARKER'"
+
+# --- path-escape helper: attempt to read the denied secret via a path ---
+# Returns FAIL if the denied SECRET was actually read (escaped),
+# PASS otherwise (contained).
+read_secret() {
+  local p="$1"
+  local got
+  got=$(cat "/worktree/$p" 2>/dev/null)
+  if [ -n "$got" ] && [ "$got" = "$SECRET" ]; then
+    echo "FAIL"
+  else
+    echo "PASS"
+  fi
+}
+
+# DOTDOT: worktree/../denied-sentinel/<secretfile>
+DOTDOT_ESCAPE=$(read_secret "$DOTDOT")
+echo "DOTDOT_ESCAPE=$DOTDOT_ESCAPE" >> "$R"
+log "dotdot escape: $DOTDOT_ESCAPE"
+
+# SYMLINK (relative): worktree/escape-link/<secretfile>  (escape-link -> ../denied-sentinel)
+SYMLINK_ESCAPE_REL=$(read_secret "$SYMLINK_REL")
+echo "SYMLINK_ESCAPE_REL=$SYMLINK_ESCAPE_REL" >> "$R"
+log "symlink-rel escape: $SYMLINK_ESCAPE_REL"
+
+# SYMLINK (absolute): worktree/escape-link-abs/<secretfile> (escape-link-abs -> /tmp/.../denied-sentinel)
+SYMLINK_ESCAPE_ABS=$(read_secret "$SYMLINK_ABS")
+echo "SYMLINK_ESCAPE_ABS=$SYMLINK_ESCAPE_ABS" >> "$R"
+log "symlink-abs escape: $SYMLINK_ESCAPE_ABS"
+
+# ABSOLUTE PATH: guest tries the host's absolute denied-sentinel path directly.
+# In the guest namespace /tmp is its OWN rootfs, not the host's; reading the
+# host's absolute path must NOT surface the host secret.
+ABSOLUTE_PATH_ESCAPE=$(read_secret "$ABS_PATH")
+echo "ABSOLUTE_PATH_ESCAPE=$ABSOLUTE_PATH_ESCAPE" >> "$R"
+log "absolute-path escape: $ABSOLUTE_PATH_ESCAPE"
+
+# --- HOST HOME exposure ---
+# No HOME mount is configured. The guest should not see /Users at all.
+if [ -e /Users ]; then
+  HOST_HOME_EXPOSED_TO_GUEST=YES
+else
+  HOST_HOME_EXPOSED_TO_GUEST=NO
+fi
+echo "HOST_HOME_EXPOSED_TO_GUEST=$HOST_HOME_EXPOSED_TO_GUEST" >> "$R"
+log "host home exposed: $HOST_HOME_EXPOSED_TO_GUEST"
+
+# --- network device check (only loopback allowed) ---
+GUEST_INTERFACES=""
+GUEST_HAS_VIRTIO_NET=NO
+iface_list=""
+if [ -f /proc/net/dev ]; then
+  iface_list=$(grep -v 'lo:' /proc/net/dev 2>/dev/null | awk -F: 'NR>1 {print $1}' | tr -d ' ' | grep -v '^$' | tr '\n' ',' )
+fi
+GUEST_INTERFACES="${iface_list%,}"
+if [ -n "$GUEST_INTERFACES" ]; then
+  GUEST_HAS_VIRTIO_NET=YES
+fi
+echo "GUEST_HAS_VIRTIO_NET=$GUEST_HAS_VIRTIO_NET" >> "$R"
+echo "GUEST_INTERFACES=$GUEST_INTERFACES" >> "$R"
+log "guest interfaces: '$GUEST_INTERFACES' virtio_net=$GUEST_HAS_VIRTIO_NET"
+
+echo "STAGE0B_GUEST_DONE=1" >> "$R"
+
+sync 2>/dev/null
+log "stage0b guest probe complete; results at /worktree/guest-results.txt"
+
+# idle so the host controls VM stop (host calls vm.stop after --run-seconds)
+while true; do sleep 3600; done
