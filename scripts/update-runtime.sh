@@ -7,8 +7,10 @@
 #
 # Safety properties
 # -----------------
-#   * Copies only server.mjs, package.json, package-lock.json.
-#     Never .git, tests, scripts, docs, config, secrets or caches.
+#   * Copies server.mjs, package.json, package-lock.json and the scripts/ tree
+#     (server.mjs imports runtime modules from ./scripts at startup, so the
+#     v2.0.0 build cannot boot without it). Never .git, tests, docs, config,
+#     secrets or caches.
 #   * Builds the new runtime in a staging directory on the same filesystem, then
 #     swaps it in with a single rename, so RUNTIME_ROOT is never half-installed.
 #   * Preserves runtime state (sandbox/, worktrees/, logs/) across the swap.
@@ -79,6 +81,7 @@ log "update-runtime: node=$NODE_BIN ($("$NODE_BIN" --version))"
 for f in server.mjs package.json package-lock.json; do
   [ -f "$SOURCE_ROOT/$f" ] || fail "missing source file: $SOURCE_ROOT/$f"
 done
+[ -d "$SOURCE_ROOT/scripts" ] || fail "missing source directory: $SOURCE_ROOT/scripts"
 
 [ -d "$RUNTIME_PARENT" ] || fail "runtime parent does not exist: $RUNTIME_PARENT"
 [ -w "$RUNTIME_PARENT" ] || fail "runtime parent is not writable: $RUNTIME_PARENT"
@@ -112,6 +115,7 @@ log "update-runtime: staging=$STAGING"
 cp -p "$SOURCE_ROOT/server.mjs" "$STAGING/server.mjs"
 cp -p "$SOURCE_ROOT/package.json" "$STAGING/package.json"
 cp -p "$SOURCE_ROOT/package-lock.json" "$STAGING/package-lock.json"
+cp -Rp "$SOURCE_ROOT/scripts" "$STAGING/scripts"
 
 STAGED_SHA="$(hash_file "$STAGING/server.mjs")"
 [ "$STAGED_SHA" = "$SOURCE_SHA" ] \
