@@ -180,11 +180,16 @@ mkdir -p "$ASSET_DIR"
 
 if [ -f "$ISO" ]; then
   DL=$(shasum -a 256 "$ISO" | awk '{print $1}')
-  if [ "$DL" = "$ASSET_SHA256" ]; then ASSET_DOWNLOADED_SHA256="$DL"; fi
+  if [ "$DL" = "$ASSET_SHA256" ]; then
+    ASSET_DOWNLOADED_SHA256="$DL"
+  else
+    # stale / partial / corrupt download -> remove so we never resume garbage
+    rm -f "$ISO"
+  fi
 fi
 if [ -z "$ASSET_DOWNLOADED_SHA256" ] || [ "$ASSET_DOWNLOADED_SHA256" != "$ASSET_SHA256" ]; then
   echo "    downloading ISO (timeout ${ASSET_TIMEOUT}s) ..."
-  if ! curl -fsSL --max-time "$ASSET_TIMEOUT" -o "$ISO" "$ISO_URL" 2>/tmp/p35_dl.err; then
+  if ! curl -fsSL -C - --max-time "$ASSET_TIMEOUT" -o "$ISO" "$ISO_URL" 2>/tmp/p35_dl.err; then
     echo "ASSET_DOWNLOAD_FAIL: $(tail -1 /tmp/p35_dl.err)" >&2
     ASSET_GATE=BLOCKED
     echo "NOTE: official asset + published SHA-256 are pinned in assets.lock.json; download was blocked by this environment (network throttle / sandbox). Re-run in native Terminal.app."
@@ -215,6 +220,13 @@ if [ -z "$KFOUND" ] || [ -z "$IFOUND" ]; then
   finish BLOCKED
 fi
 cp "$KFOUND" "$KERNEL"; cp "$IFOUND" "$INITRD"
+
+# sanity: extracted assets must be non-empty (a 0-byte extract means the ISO
+# was corrupt or the paths inside it changed)
+if [ ! -s "$KERNEL" ] || [ ! -s "$INITRD" ]; then
+  echo "ASSET_EXTRACT_EMPTY: kernel/initrd extracted but empty (K=$KFOUND I=$IFOUND)" >&2
+  finish BLOCKED
+fi
 
 # ============================ VM CONFIG VALIDATION ============================
 echo "--> VM configuration validation"
