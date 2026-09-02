@@ -18,6 +18,24 @@
 //       Build + validate + start the VM, hold it --run-seconds, then stop.
 //
 // Exit codes: 0 = stage succeeded, 2 = stage failed (real error on stderr).
+//
+// QUEUE AFFINITY (Stage 0A Queue-Affinity Repair):
+//   A VZVirtualMachine is bound to an associated dispatch queue. If no queue is
+//   supplied it defaults to the main queue, and EVERY property access and
+//   method call (start/stop/state/...) must occur on that associated queue.
+//   The original prototype created the VM implicitly on a Swift-concurrency
+//   worker thread while calling start() from a different cooperative-pool
+//   thread -> dispatch_assert_queue_fail -> SIGILL.
+//
+//   Fix (方案 A): an explicit dedicated serial DispatchQueue `vmQueue` is passed
+//   to `VZVirtualMachine(configuration:queue:)`, and ALL lifecycle operations
+//   (create / start / state / stop) are executed ON vmQueue. The Swift
+//   concurrency surface is avoided here on purpose: the whole stage runs on a
+//   global dispatch queue (never the cooperative pool and never vmQueue), and
+//   only blocks on a DispatchSemaphore / DispatchGroup — so there is no
+//   same-queue deadlock and no @Sendable capture of the non-Sendable VM.
+//   A DispatchSpecificKey marker proves every lifecycle step actually ran on
+//   vmQueue (see VM_QUEUE_POLICY self-check).
 
 import Foundation
 import Virtualization
@@ -99,6 +117,23 @@ func buildConfig() -> VZVirtualMachineConfiguration {
     return config
 }
 
+// Map VZVirtualMachine.State to a clean string (rawValue-print is noisy).
+func stateName(_ s: VZVirtualMachine.State) -> String {
+    switch s {
+    case .stopped:   return "stopped"
+    case .running:   return "running"
+    case .paused:    return "paused"
+    case .error:     return "error"
+    case .starting:  return "starting"
+    case .pausing:   return "pausing"
+    case .resuming:  return "resuming"
+    case .stopping:  return "stopping"
+    case .saving:    return "saving"
+    case .restoring: return "restoring"
+    @unknown default: return "unknown(\(s.rawValue))"
+    }
+}
+
 // ======================================================================
 if sub == "validate" {
     let isSupported = VZVirtualMachine.isSupported
@@ -128,9 +163,28 @@ if sub == "validate" {
 
 // ======================================================================
 else if sub == "run" {
-    // The run stage needs async VM start/stop (Virtualization.framework on
-    // macOS 15 exposes VZVirtualMachine.start()/stop() as async).
-    func runStage() async {
+    // --- Queue-affinity plumbing (Stage 0A Queue-Affinity Repair) ---
+    // Dedicated serial queue bound to the VM, plus a marker key used to PROVE
+    // every lifecycle op actually executes on this exact queue.
+    let vmQueueKey = DispatchSpecificKey<String>()
+    let vmQueueLabel = "com.localmcpdevrunner.stage0a.vz"
+    let vmQueue = DispatchQueue(label: vmQueueLabel, qos: .userInitiated)
+    vmQueue.setSpecific(key: vmQueueKey, value: vmQueueLabel)
+
+    // Lifecycle outcomes.
+    var vmStart = false
+    var vmRunning = false
+    var vmStop = false
+    var vmFinalState = "unknown"
+    var startErrorStr = ""
+    var coldStartMs = -1
+
+    // Queue-affinity self-check evidence.
+    var vmCreateQueue = "OTHER"
+    var vmStartQueue = "OTHER"
+    var vmStopQueue = "OTHER"
+
+    func runStage() {
         let isSupported = VZVirtualMachine.isSupported
         if !isSupported {
             fail("run", "VZVirtualMachine.isSupported == false on this host")
@@ -141,51 +195,82 @@ else if sub == "run" {
             fail("run", "config.validate failed: \(error)")
         }
 
-        let vm: VZVirtualMachine
-        // VZVirtualMachine(configuration:) is non-throwing in this SDK.
-        vm = VZVirtualMachine(configuration: config)
+        // 1) CREATE on vmQueue (proves create affinity).
+        var vm: VZVirtualMachine!
+        vmQueue.sync {
+            vmCreateQueue = (DispatchQueue.getSpecific(key: vmQueueKey) != nil) ? vmQueueLabel : "OTHER"
+            vm = VZVirtualMachine(configuration: config, queue: vmQueue)
+        }
 
         let startT = Date()
-        var vmStart = false
-        var startError: String? = nil
-        do {
-            try await vm.start()
-            vmStart = true
-        } catch {
-            startError = String(describing: error)
-        }
 
-        if !vmStart {
-            fail("run", "vm.start() failed: \(startError ?? "unknown")")
-        }
-
-        // Confirm running state.
-        var vmRunning = (vm.state == .running)
-        if !vmRunning {
-            for _ in 0..<20 {
-                if vm.state == .running { vmRunning = true; break }
-                try? await Task.sleep(nanoseconds: 100_000_000)
+        // 2) START on vmQueue (proves start affinity).
+        let startGroup = DispatchGroup()
+        startGroup.enter()
+        vmQueue.async {
+            vmStartQueue = (DispatchQueue.getSpecific(key: vmQueueKey) != nil) ? vmQueueLabel : "OTHER"
+            vm.start { result in
+                switch result {
+                case .success:
+                    break
+                case .failure(let e):
+                    startErrorStr = String(describing: e)
+                    fputs("run ERROR: vm.start() failed: \(startErrorStr)\n", stderr)
+                }
+                startGroup.leave()
             }
         }
-        let runningT = Date()
-        let coldStartMs = Int(runningT.timeIntervalSince(startT) * 1000)
+        startGroup.wait()
+        vmStart = startErrorStr.isEmpty
 
-        // Hold the VM for --run-seconds.
-        try? await Task.sleep(nanoseconds: UInt64(runSeconds) * 1_000_000_000)
+        // 3) poll RUNNING on vmQueue.
+        if vmStart {
+            for _ in 0..<40 {
+                let grp = DispatchGroup(); grp.enter()
+                var st: VZVirtualMachine.State = .stopped
+                vmQueue.async { st = vm.state; grp.leave() }
+                grp.wait()
+                if st == .running { vmRunning = true; break }
+                Thread.sleep(forTimeInterval: 0.1)
+            }
+            let runningT = Date()
+            coldStartMs = Int(runningT.timeIntervalSince(startT) * 1000)
 
-        // Stop the VM.
-        var vmStop = false
-        var stopError: String? = nil
-        do {
-            try await vm.stop()
-            vmStop = true
-        } catch {
-            stopError = String(describing: error)
+            // 4) hold the VM for --run-seconds.
+            Thread.sleep(forTimeInterval: Double(runSeconds))
+
+            // 5) STOP on vmQueue (proves stop affinity).
+            let stopGroup = DispatchGroup(); stopGroup.enter()
+            vmQueue.async {
+                vmStopQueue = (DispatchQueue.getSpecific(key: vmQueueKey) != nil) ? vmQueueLabel : "OTHER"
+                vm.stop { error in
+                    vmStop = (error == nil)
+                    stopGroup.leave()
+                }
+            }
+            stopGroup.wait()
+            Thread.sleep(forTimeInterval: 0.5)
+            let fg = DispatchGroup(); fg.enter()
+            var finalStr = "unknown"
+            vmQueue.async { finalStr = stateName(vm.state); fg.leave() }
+            fg.wait()
+            vmFinalState = finalStr
+        } else {
+            vmFinalState = "not-started"
         }
 
-        // Let the stop settle, then read final state.
-        try? await Task.sleep(nanoseconds: 500_000_000)
-        let finalState = String(describing: vm.state)
+        // Queue-affinity self-check: all three lifecycle steps must land on the
+        // SAME associated queue (vmQueueLabel). Derived from the
+        // DispatchSpecificKey marker captured inside each op's closure — not
+        // from any assumption about which thread Swift concurrency runs on.
+        let policy: String
+        if vmCreateQueue == vmQueueLabel && vmStartQueue == vmQueueLabel && vmStopQueue == vmQueueLabel {
+            policy = "PASS"
+        } else if vmCreateQueue == vmQueueLabel {
+            policy = "PARTIAL_CREATE_ONLY"
+        } else {
+            policy = "FAIL"
+        }
 
         emit([
             "stage": "run",
@@ -196,20 +281,30 @@ else if sub == "run" {
             "vmStart": vmStart,
             "vmRunning": vmRunning,
             "vmStop": vmStop,
-            "vmFinalState": finalState,
+            "vmFinalState": vmFinalState,
             "coldStartMs": coldStartMs,
-            "error": stopError as Any
+            "vmQueueLabel": vmQueueLabel,
+            "vmCreateQueue": vmCreateQueue,
+            "vmStartQueue": vmStartQueue,
+            "vmStopQueue": vmStopQueue,
+            "vmQueuePolicy": policy,
+            "error": startErrorStr as Any
         ])
-        exit((vmStart && vmRunning && vmStop) ? 0 : 2)
+        let stageOk = vmStart && vmRunning && vmStop
+        exit(stageOk ? 0 : 2)
     }
 
+    // The whole stage runs on a GLOBAL dispatch queue (never the cooperative
+    // pool and never vmQueue). The main thread only blocks on the semaphore,
+    // and the stage only blocks on vmQueue (a different thread) — so there is
+    // no same-queue deadlock.
     let sem = DispatchSemaphore(value: 0)
-    Task {
-        await runStage()
+    DispatchQueue.global(qos: .userInitiated).async {
+        runStage()
         sem.signal()
     }
     sem.wait()
-    // runStage calls exit() internally before returning; this is a fallback.
+    // runStage calls exit() internally; this is a fallback.
     exit(0)
 }
 

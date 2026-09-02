@@ -75,3 +75,35 @@ bash experiments/p35-stage0a/run-native-stage0a.sh
 资产下载（63MB Alpine ISO）在受限网络下可能被节流；脚本已将其推迟到原生
 Terminal 执行，且 `assets.lock.json` 钉死官方上游版本与 SHA-256，任何校验失败
 一律 `BLOCKED`、不降低标准。
+
+## Stage 0A Queue-Affinity 修复
+
+早期版本的 prototype 在 VM start 时触发 `EXC_BAD_INSTRUCTION` / `SIGILL`
+（`_dispatch_assert_queue_fail`）：`VZVirtualMachine` 绑定到一个关联 dispatch
+queue，所有 lifecycle 操作（create / start / state / stop）都**必须**在该 queue
+上执行；而原实现让 `Task { await runStage() }` 在 Swift concurrency 协作池线程上
+创建并调用 `start()`，与默认（main）关联 queue 不一致，于是 assert 崩溃。
+
+修复（方案 A）：
+
+- 显式创建专用串行 queue `vmQueue`
+  （`com.localmcpdevrunner.stage0a.vz`），通过
+  `VZVirtualMachine(configuration:queue:)` 绑定给 VM；
+- **create / start / state / stop 全部在 `vmQueue` 上执行**；
+- 用 `DispatchGroup` 在全局 queue 上桥接，主线程只阻塞于 `DispatchSemaphore`，
+  与 `vmQueue` 不是同一线程 → 无同 queue 死锁；
+- 用 `DispatchSpecificKey` 标记在每次 lifecycle 闭包内读取当前 queue，结构性证明
+  三个操作都落在同一个 `vmQueue`。
+
+`run` 子命令在 JSON 中额外输出自检字段：
+
+| 字段 | 含义 |
+|------|------|
+| `vmQueueLabel` | 绑定的关联 queue label |
+| `vmCreateQueue` / `vmStartQueue` / `vmStopQueue` | 各操作实际执行所在 queue（= vmQueueLabel 即通过） |
+| `vmQueuePolicy` | `PASS` = 三者均在同一关联 queue；`PARTIAL_CREATE_ONLY` / `FAIL` 表示未达成 |
+
+未改动安全模型：entitlement 仍为 `com.apple.security.virtualization=true`、
+无 `com.apple.security.hypervisor`、无 app-sandbox。修复后原生 Terminal 运行
+`run-native-stage0a.sh` 应得到 `VM_START/VM_RUNNING/VM_STOP=true`、
+`VM_FINAL_STATE=stopped`、`STAGE0A_RESULT=PASS`。
