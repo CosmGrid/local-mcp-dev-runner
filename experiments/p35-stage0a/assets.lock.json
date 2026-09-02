@@ -1,0 +1,20 @@
+{
+  "schema": "p35-stage0a-asset-lock/v1",
+  "asset": {
+    "source": "alpinelinux.org (official upstream)",
+    "distribution": "Alpine Linux",
+    "release": "3.21.3",
+    "arch": "x86_64",
+    "flavor": "virt",
+    "rationale": "Alpine 'virt' ISO ships a Virtualization.framework-ready x86_64 kernel (boot/vmlinuz-virt) and matching initramfs (boot/initramfs-virt) with virtio drivers built in; boots headless with console=hvc0 init=/bin/sh.",
+    "isoUrl": "https://dl-cdn.alpinelinux.org/alpine/v3.21/releases/x86_64/alpine-virt-3.21.3-x86_64.iso",
+    "isoSha256Url": "https://dl-cdn.alpinelinux.org/alpine/v3.21/releases/x86_64/alpine-virt-3.21.3-x86_64.iso.sha256",
+    "publishedSha256": "f28171c35bbf623aa3cbaec4b8b29297f13095b892c1a283b15970f7eb490f2d",
+    "kernelPathInIso": "boot/vmlinuz-virt",
+    "initrdPathInIso": "boot/initramfs-virt",
+    "extractedKernel": "vmlinuz-virt",
+    "extractedInitrd": "initramfs-virt",
+    "verifiedInWorkBuddy": false,
+    "note": "ISO SHA-256 published by Alpine at the .sha256 sidecar URL above (fetched and confirmed during prototype build). Full download + hash verification runs inside run-native-stage0a.sh (asset stage). WorkBuddy network was throttled (~50 KB/s) so the 63 MB download was deferred to native Terminal; the asset itself is a verifiable official upstream, not BLOCKED."
+  }
+}

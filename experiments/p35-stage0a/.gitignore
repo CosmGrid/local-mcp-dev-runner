@@ -1,0 +1,31 @@
+# === Stage 0A Virtualization Prototype — ignore rules ===
+# 严禁把 Linux boot 资产提交进 Git。
+# 只放 prototype 自身源码；ISO / kernel / initrd / build 产物全部忽略。
+
+# Swift build 产物
+.build/
+stage0a-vz-tool
+*.o
+
+# 下载缓存（ISO 等）—— 大文件，绝不进仓库
+*.iso
+*.img
+*.qcow2
+
+# 从 ISO 抽取的 guest 资产
+vmlinuz-virt
+initramfs-virt
+kernel
+initrd
+
+# 运行时缓存目录（脚本会指向 /tmp/lmdr-p35-stage0a-*）
+cache/
+downloads/
+
+# macOS 派生文件
+.DS_Store
+*.swp
+
+# 任何真实 worktree / runtime 痕迹
+worktree/
+.runtime-state.json
