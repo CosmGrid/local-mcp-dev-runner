@@ -90,16 +90,19 @@ finish() {
   if [ "$r" = "PASS" ]; then exit 0; else exit 1; fi
 }
 
-# run a command with a wall-clock timeout (background + kill), bash-portable
+# run a command with a wall-clock timeout (background + kill), bash-portable.
+# Uses integer half-second ticks so it works without bc and never emits a
+# "integer expression expected" error.
 run_with_timeout() {
   local t="$1"; shift
+  local limit=$(( t * 2 ))   # t seconds -> t*2 half-second ticks
   "$@" &
   local pid=$!
   local i=0
   while kill -0 "$pid" 2>/dev/null; do
     sleep 0.5
     i=$((i+1))
-    if [ $(echo "$i*0.5" | bc) -ge "$t" ]; then
+    if [ "$i" -ge "$limit" ]; then
       kill -9 "$pid" 2>/dev/null
       wait "$pid" 2>/dev/null
       return 124
@@ -219,7 +222,7 @@ if [ -z "$KFOUND" ] || [ -z "$IFOUND" ]; then
   echo "ASSET_EXTRACT_FAIL: kernel/initrd not found in ISO (got K=$KFOUND I=$IFOUND)" >&2
   finish BLOCKED
 fi
-cp "$KFOUND" "$KERNEL"; cp "$IFOUND" "$INITRD"
+cp -f "$KFOUND" "$KERNEL"; cp -f "$IFOUND" "$INITRD"
 
 # sanity: extracted assets must be non-empty (a 0-byte extract means the ISO
 # was corrupt or the paths inside it changed)
@@ -232,7 +235,7 @@ fi
 echo "--> VM configuration validation"
 VAL_OUT="$( "$BIN" validate --kernel "$KERNEL" --initrd "$INITRD" 2>/tmp/p35_val.err )" \
   || { echo "VALIDATE_FAIL: $(cat /tmp/p35_val.err)"; VZ_CONFIG_VALIDATE=FAIL; finish REPAIR; }
-VZ_CONFIG_VALIDATE="$(echo "$VAL_OUT" | grep -o '"configValid"[^,}]*' | sed 's/.*: *//; s/}//')"
+VZ_CONFIG_VALIDATE="$(echo "$VAL_OUT" | grep -o '"ok"[^,}]*' | sed 's/.*: *//; s/}//')"
 NETWORK_DEVICE_COUNT="$(echo "$VAL_OUT" | grep -o '"networkDeviceCount"[^,}]*' | sed 's/.*: *//; s/}//')"
 [ "$VZ_CONFIG_VALIDATE" = "true" ] || { echo "CONFIG_INVALID"; finish REPAIR; }
 [ "$NETWORK_DEVICE_COUNT" = "0" ] || { echo "NETWORK_DEVICE_COUNT=$NETWORK_DEVICE_COUNT (must be 0)"; finish REPAIR; }
@@ -245,7 +248,11 @@ if [ $RC -eq 124 ]; then
   echo "VM_RUN_TIMEOUT (helper hung; environment likely blocks Virtualization.framework)" >&2
   VM_START=FAIL
 elif [ $RC -ne 0 ] || [ -z "$RUN_OUT" ]; then
-  echo "VM_RUN_FAIL: $(cat /tmp/p35_run.err)" >&2
+  echo "VM_RUN_FAIL rc=$RC: $(cat /tmp/p35_run.err)" >&2
+  if [ "$RC" -gt 128 ]; then
+    echo "VM_RUN_SIGNAL=$((RC-128)) (process killed at syscall level by sandbox/hypervisor denial, not a catchable NSError)" >&2
+  fi
+  [ -n "$RUN_OUT" ] && echo "VM_RUN_STDOUT=$RUN_OUT" >&2
   VM_START=FAIL
 else
   VM_START="$(echo "$RUN_OUT" | grep -o '"vmStart"[^,}]*' | sed 's/.*: *//; s/}//')"
