@@ -199,6 +199,28 @@ if [[ "$F7_RES" != *"CLEANUP_PATH_GATE=PASS TEMP_FILES_CLEANED=PASS LEFTOVER_RUN
 fi
 echo "PASS: Fixture 7 - 8-criteria canonical cleanup gate verified"
 
+# ----------------------------------------------------
+# Fixture 8: Serial Attachment SIGABRT Regression
+# ----------------------------------------------------
+REGRESSION_CHECK=$(swift -e '
+import Virtualization
+import Foundation
+
+let pipe = Pipe()
+let attachment = VZFileHandleSerialPortAttachment(fileHandleForReading: nil, fileHandleForWriting: pipe.fileHandleForWriting)
+if attachment.fileHandleForWriting != nil {
+    print("TEST_MODE_SIGABRT_REGRESSION=PASS")
+} else {
+    print("TEST_MODE_SIGABRT_REGRESSION=FAIL")
+}
+' 2>&1)
+
+if ! echo "$REGRESSION_CHECK" | grep -q "TEST_MODE_SIGABRT_REGRESSION=PASS"; then
+  echo "FAIL: Fixture 8 - serial port attachment regression check failed: $REGRESSION_CHECK"
+  exit 1
+fi
+echo "PASS: Fixture 8 - TEST_MODE_SIGABRT_REGRESSION=PASS"
+
 echo "========================================="
 echo "ALL STAGE 0D FIXTURES PASSED"
 echo "========================================="

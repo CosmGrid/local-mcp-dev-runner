@@ -176,22 +176,43 @@ func probeNetworkConnect(port: Int) -> ProbeResult {
 
 func runHostContainmentProbes(manifest: ProbeManifest, phasePrefix: String) -> ([String: Any], Bool) {
     var phaseMap: [String: Any] = [:]
+    let emitMarker = (phasePrefix == "PRE_VM")
 
+    if emitMarker { fputs("PHASE1_ALLOWED_READ_BEGIN\n", stdout); fflush(stdout) }
     let allowedRead = probeAllowedRead(path: manifest.allowedRead)
+    if emitMarker { fputs("PHASE1_ALLOWED_READ_END\n", stdout); fflush(stdout) }
+
+    if emitMarker { fputs("PHASE1_ALLOWED_WRITE_BEGIN\n", stdout); fflush(stdout) }
     let allowedWrite = probeAllowedWrite(path: manifest.allowedWriteTarget)
+    if emitMarker { fputs("PHASE1_ALLOWED_WRITE_END\n", stdout); fflush(stdout) }
+
+    if emitMarker { fputs("PHASE1_SIBLING_READ_BEGIN\n", stdout); fflush(stdout) }
     let deniedSibling = probeDeniedRead(path: manifest.deniedSiblingRead)
     let deniedParent = probeDeniedRead(path: manifest.deniedParentRead)
+    if emitMarker { fputs("PHASE1_SIBLING_READ_END\n", stdout); fflush(stdout) }
+
+    if emitMarker { fputs("PHASE1_FAKE_HOME_BEGIN\n", stdout); fflush(stdout) }
     let deniedHomeSsh = probeDeniedRead(path: manifest.deniedHomeSsh)
     let deniedHomeAws = probeDeniedRead(path: manifest.deniedHomeAws)
     let deniedHomeConfig = probeDeniedRead(path: manifest.deniedHomeConfig)
     let deniedRuntimeSentinel = probeDeniedRead(path: manifest.deniedRuntimeSentinel)
     let deniedProjectsSentinel = probeDeniedRead(path: manifest.deniedProjectsSentinel)
+    if emitMarker { fputs("PHASE1_FAKE_HOME_END\n", stdout); fflush(stdout) }
+
+    if emitMarker { fputs("PHASE1_SYMLINK_BEGIN\n", stdout); fflush(stdout) }
     let deniedSymlinkRel = probeDeniedRead(path: manifest.deniedSymlinkEscapeRel)
     let deniedSymlinkAbs = probeDeniedRead(path: manifest.deniedSymlinkEscapeAbs)
+    if emitMarker { fputs("PHASE1_SYMLINK_END\n", stdout); fflush(stdout) }
+
+    if emitMarker { fputs("PHASE1_ABSOLUTE_PATH_BEGIN\n", stdout); fflush(stdout) }
     let deniedAbsolutePath = probeDeniedRead(path: manifest.deniedAbsolutePath)
+    if emitMarker { fputs("PHASE1_ABSOLUTE_PATH_END\n", stdout); fflush(stdout) }
+
+    if emitMarker { fputs("PHASE1_DENIED_WRITE_BEGIN\n", stdout); fflush(stdout) }
     let deniedWriteSibling = probeDeniedWrite(path: manifest.deniedWriteSibling)
     let deniedWriteParent = probeDeniedWrite(path: manifest.deniedWriteParent)
     let deniedWriteHome = probeDeniedWrite(path: manifest.deniedWriteHome)
+    if emitMarker { fputs("PHASE1_DENIED_WRITE_END\n", stdout); fflush(stdout) }
 
     phaseMap["\(phasePrefix)_ALLOWED_READ"] = allowedRead.status
     phaseMap["\(phasePrefix)_ALLOWED_WRITE"] = allowedWrite.status
@@ -209,7 +230,10 @@ func runHostContainmentProbes(manifest: ProbeManifest, phasePrefix: String) -> (
     phaseMap["\(phasePrefix)_DENIED_WRITE_PARENT"] = deniedWriteParent.status
     phaseMap["\(phasePrefix)_DENIED_WRITE_HOME"] = deniedWriteHome.status
 
+    if emitMarker { fputs("PHASE1_NETWORK_BEGIN\n", stdout); fflush(stdout) }
     let netRes = probeNetworkConnect(port: manifest.tcpPort)
+    if emitMarker { fputs("PHASE1_NETWORK_END\n", stdout); fflush(stdout) }
+
     if netRes.status == "PASS" {
         phaseMap["\(phasePrefix)_NETWORK_ACCESS"] = "DENIED"
         phaseMap["\(phasePrefix)_NETWORK_GATE"] = "PASS"
@@ -221,6 +245,7 @@ func runHostContainmentProbes(manifest: ProbeManifest, phasePrefix: String) -> (
         phaseMap["\(phasePrefix)_NETWORK_GATE"] = "INCONCLUSIVE"
     }
 
+    if emitMarker { fputs("PHASE1_CHILD_BEGIN\n", stdout); fflush(stdout) }
     let childProc = Process()
     childProc.executableURL = URL(fileURLWithPath: manifest.helperPath)
     childProc.arguments = [
@@ -233,11 +258,18 @@ func runHostContainmentProbes(manifest: ProbeManifest, phasePrefix: String) -> (
     do {
         try childProc.run()
         childProc.waitUntilExit()
-        let childData = pipe.fileHandleForReading.readDataToEndOfFile()
-        if let childRes = try? JSONDecoder().decode(ChildProbeResult.self, from: childData) {
-            phaseMap["\(phasePrefix)_CHILD_ALLOWED_READ"] = childRes.childAllowedRead
-            phaseMap["\(phasePrefix)_CHILD_DENIED_SENTINEL_READ"] = childRes.childDeniedSentinelRead
-            phaseMap["\(phasePrefix)_CHILD_CONTAINMENT"] = childRes.childInheritsContainment
+        let childExit = childProc.terminationStatus
+        if childExit == 0 {
+            let childData = pipe.fileHandleForReading.readDataToEndOfFile()
+            if let childRes = try? JSONDecoder().decode(ChildProbeResult.self, from: childData) {
+                phaseMap["\(phasePrefix)_CHILD_ALLOWED_READ"] = childRes.childAllowedRead
+                phaseMap["\(phasePrefix)_CHILD_DENIED_SENTINEL_READ"] = childRes.childDeniedSentinelRead
+                phaseMap["\(phasePrefix)_CHILD_CONTAINMENT"] = childRes.childInheritsContainment
+            } else {
+                phaseMap["\(phasePrefix)_CHILD_ALLOWED_READ"] = "FAIL"
+                phaseMap["\(phasePrefix)_CHILD_DENIED_SENTINEL_READ"] = "FAIL"
+                phaseMap["\(phasePrefix)_CHILD_CONTAINMENT"] = "FAIL"
+            }
         } else {
             phaseMap["\(phasePrefix)_CHILD_ALLOWED_READ"] = "FAIL"
             phaseMap["\(phasePrefix)_CHILD_DENIED_SENTINEL_READ"] = "FAIL"
@@ -248,6 +280,7 @@ func runHostContainmentProbes(manifest: ProbeManifest, phasePrefix: String) -> (
         phaseMap["\(phasePrefix)_CHILD_DENIED_SENTINEL_READ"] = "FAIL"
         phaseMap["\(phasePrefix)_CHILD_CONTAINMENT"] = "FAIL"
     }
+    if emitMarker { fputs("PHASE1_CHILD_END\n", stdout); fflush(stdout) }
 
     let allPass = (allowedRead.status == "PASS") &&
                   (allowedWrite.status == "PASS") &&
@@ -397,7 +430,7 @@ func runTestMode(manifestPath: String) {
             let consolePipe = Pipe()
             let serialPort = VZVirtioConsoleDeviceSerialPortConfiguration()
             serialPort.attachment = VZFileHandleSerialPortAttachment(
-                fileHandleForReading: FileHandle.nullDevice,
+                fileHandleForReading: nil,
                 fileHandleForWriting: consolePipe.fileHandleForWriting
             )
             vmConfig.serialPorts = [serialPort]
@@ -671,6 +704,24 @@ func runValidateMode(args: [String]) {
     }
 }
 
+func runPhase1SmokeMode(manifestPath: String) {
+    guard let manifestData = try? Data(contentsOf: URL(fileURLWithPath: manifestPath)),
+          let manifest = try? JSONDecoder().decode(ProbeManifest.self, from: manifestData) else {
+        fputs("ERROR: failed to read manifest from \(manifestPath)\n", stderr)
+        exit(2)
+    }
+    fputs("STAGE0D_PHASE1_ENTERED=YES\n", stdout); fflush(stdout)
+    let (phase1Map, phase1Pass) = runHostContainmentProbes(manifest: manifest, phasePrefix: "PRE_VM")
+    var report = phase1Map
+    report["HOST_CONTAINMENT_PRE_VM"] = phase1Pass ? "PASS" : "FAIL"
+    report["STAGE0D_PHASE1_SMOKE_RESULT"] = phase1Pass ? "PASS" : "FAIL"
+    if let jsonData = try? JSONSerialization.data(withJSONObject: report, options: [.sortedKeys, .prettyPrinted]),
+       let jsonStr = String(data: jsonData, encoding: .utf8) {
+        print(jsonStr)
+    }
+    exit(phase1Pass ? 0 : 1)
+}
+
 func main() {
     fputs("STAGE0D_MAIN_ENTERED=YES\n", stdout); fflush(stdout)
     let args = CommandLine.arguments
@@ -697,6 +748,12 @@ func main() {
         print("STAGE0D_HELPER_MAIN_ENTERED=YES")
         fflush(stdout)
         exit(0)
+    } else if mode == "phase1-smoke" {
+        if manifestPath.isEmpty {
+            fputs("Usage: stage0d-vz-tool --mode phase1-smoke --manifest <probes.json>\n", stderr)
+            exit(2)
+        }
+        runPhase1SmokeMode(manifestPath: manifestPath)
     } else if mode == "child" {
         runChildMode(args: Array(args.dropFirst()))
     } else if mode == "validate" {
