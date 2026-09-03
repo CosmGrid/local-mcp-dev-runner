@@ -773,6 +773,63 @@ func runValidateMode(args: [String]) {
     }
 }
 
+func runPhase1ControlMode(manifestPath: String) {
+    guard let manifestData = try? Data(contentsOf: URL(fileURLWithPath: manifestPath)),
+          let manifest = try? JSONDecoder().decode(ProbeManifest.self, from: manifestData) else {
+        fputs("ERROR: failed to read manifest from \(manifestPath)\n", stderr)
+        exit(2)
+    }
+    fputs("STAGE0D_PHASE1_CONTROL_ENTERED=YES\n", stdout); fflush(stdout)
+    let (phase1Map, _) = runHostContainmentProbes(manifest: manifest, phasePrefix: "PRE_VM")
+
+    let allowedReadOk = (phase1Map["PRE_VM_ALLOWED_READ"] as? String == "PASS")
+    let allowedWriteOk = (phase1Map["PRE_VM_ALLOWED_WRITE"] as? String == "PASS")
+
+    var sentinelsExist = true
+    let readSentinels = [
+        "PRE_VM_DENIED_SIBLING_READ", "PRE_VM_DENIED_PARENT_READ",
+        "PRE_VM_DENIED_HOME_SSH", "PRE_VM_DENIED_HOME_AWS", "PRE_VM_DENIED_HOME_CONFIG",
+        "PRE_VM_DENIED_RUNTIME_SENTINEL", "PRE_VM_DENIED_PROJECTS_SENTINEL",
+        "PRE_VM_DENIED_SYMLINK_ESCAPE_REL", "PRE_VM_DENIED_SYMLINK_ESCAPE_ABS",
+        "PRE_VM_DENIED_ABSOLUTE_PATH"
+    ]
+    for key in readSentinels {
+        if let st = phase1Map[key] as? String {
+            if st == "INCONCLUSIVE" {
+                sentinelsExist = false
+                break
+            }
+        }
+    }
+
+    var writesReachable = true
+    let writeSentinels = [
+        "PRE_VM_DENIED_WRITE_SIBLING", "PRE_VM_DENIED_WRITE_PARENT", "PRE_VM_DENIED_WRITE_HOME"
+    ]
+    for key in writeSentinels {
+        if let st = phase1Map[key] as? String {
+            if st == "INCONCLUSIVE" {
+                writesReachable = false
+                break
+            }
+        }
+    }
+
+    let controlPass = allowedReadOk && allowedWriteOk && sentinelsExist && writesReachable
+
+    var report = phase1Map
+    report["EXPECTATION_MODE"] = "UNSANDBOXED_CONTROL"
+    report["PHASE1_CONTROL_RESULT"] = controlPass ? "PASS" : "FAIL"
+    report["UNSANDBOXED_SENTINELS_EXIST"] = sentinelsExist ? "YES" : "NO"
+    report["UNSANDBOXED_WRITES_REACHABLE"] = writesReachable ? "YES" : "NO"
+
+    if let jsonData = try? JSONSerialization.data(withJSONObject: report, options: [.sortedKeys, .prettyPrinted]),
+       let jsonStr = String(data: jsonData, encoding: .utf8) {
+        print(jsonStr)
+    }
+    exit(controlPass ? 0 : 1)
+}
+
 func runPhase1SmokeMode(manifestPath: String) {
     guard let manifestData = try? Data(contentsOf: URL(fileURLWithPath: manifestPath)),
           let manifest = try? JSONDecoder().decode(ProbeManifest.self, from: manifestData) else {
@@ -817,6 +874,12 @@ func main() {
         print("STAGE0D_HELPER_MAIN_ENTERED=YES")
         fflush(stdout)
         exit(0)
+    } else if mode == "phase1-control" {
+        if manifestPath.isEmpty {
+            fputs("Usage: stage0d-vz-tool --mode phase1-control --manifest <probes.json>\n", stderr)
+            exit(2)
+        }
+        runPhase1ControlMode(manifestPath: manifestPath)
     } else if mode == "phase1-smoke" {
         if manifestPath.isEmpty {
             fputs("Usage: stage0d-vz-tool --mode phase1-smoke --manifest <probes.json>\n", stderr)

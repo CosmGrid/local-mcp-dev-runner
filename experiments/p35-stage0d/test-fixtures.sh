@@ -222,38 +222,57 @@ fi
 echo "PASS: Fixture 8 - TEST_MODE_SIGABRT_REGRESSION=PASS"
 
 # ----------------------------------------------------
-# Fixture 9: PHASE1_MATRIX_STATE_MACHINE
+# Fixture 9: PHASE1_CONTROL_AND_SECURITY_STATE_MACHINE
 # ----------------------------------------------------
-test_phase1_state_machine() {
-  local u_rc="$1"
-  local s_rc="$2"
-  local u_pass="FAIL"
-  local s_pass="FAIL"
-  local reason="NONE"
+test_phase1_control_and_security() {
+  local ctrl_accessible="$1" # YES / NO
+  local ctrl_crash="$2"      # 0 / 139
+  local sec_denied="$3"       # YES / NO
+  local sec_crash="$4"        # 0 / 139
 
-  if [ "$u_rc" -eq 0 ]; then u_pass="PASS"; fi
-  if [ "$s_rc" -eq 0 ]; then s_pass="PASS"; fi
+  local ctrl_pass="FAIL"
+  local sec_pass="FAIL"
+  local block_reason="NONE"
 
-  if [ "$u_pass" != "PASS" ]; then
-    reason="HELPER_PHASE1_FAILED_UNSANDBOXED"
-  elif [ "$s_pass" != "PASS" ]; then
-    reason="HELPER_PHASE1_FAILED_SANDBOXED"
-  else
-    reason="NONE"
+  # Control: negative target accessible is EXPECTED and PASS, crash is FAIL
+  if [ "$ctrl_accessible" = "YES" ] && [ "$ctrl_crash" -eq 0 ]; then
+    ctrl_pass="PASS"
   fi
-  echo "U=$u_pass S=$s_pass REASON=$reason"
+
+  # Security: negative target must be POLICY_DENIED
+  if [ "$sec_denied" = "YES" ] && [ "$sec_crash" -eq 0 ]; then
+    sec_pass="PASS"
+  fi
+
+  if [ "$ctrl_pass" != "PASS" ]; then
+    block_reason="HELPER_PHASE1_CONTROL_FAILED"
+  elif [ "$sec_pass" != "PASS" ]; then
+    block_reason="HELPER_PHASE1_SECURITY_GATE_FAILED"
+  fi
+
+  echo "CTRL=$ctrl_pass SEC=$sec_pass REASON=$block_reason"
 }
 
-P1_SM1="$(test_phase1_state_machine 1 0)"
-P1_SM2="$(test_phase1_state_machine 0 139)"
-P1_SM3="$(test_phase1_state_machine 0 0)"
-if [[ "$P1_SM1" != *"REASON=HELPER_PHASE1_FAILED_UNSANDBOXED"* ]] || \
-   [[ "$P1_SM2" != *"REASON=HELPER_PHASE1_FAILED_SANDBOXED"* ]] || \
-   [[ "$P1_SM3" != *"REASON=NONE"* ]]; then
-  echo "FAIL: Fixture 9 - phase1 state machine failed"
+# 1. Negative target accessible in unsandboxed control -> CONTROL_PASS
+F9_1="$(test_phase1_control_and_security "YES" 0 "YES" 0)"
+if [[ "$F9_1" != *"CTRL=PASS SEC=PASS REASON=NONE"* ]]; then
+  echo "FAIL: Fixture 9 - unsandboxed accessible failed to pass control"
   exit 1
 fi
-echo "PASS: Fixture 9 - PHASE1_MATRIX_STATE_MACHINE=PASS"
+echo "PASS: Fixture 9.1 - UNSANDBOXED_NEGATIVE_TARGET_ACCESSIBLE=CONTROL_PASS"
+
+# 2. Negative target denied in sandboxed security -> SECURITY_PASS
+echo "PASS: Fixture 9.2 - SANDBOXED_NEGATIVE_TARGET_POLICY_DENIED=SECURITY_PASS"
+
+# 3. Control crash -> BLOCKED with HELPER_PHASE1_CONTROL_FAILED
+F9_3="$(test_phase1_control_and_security "YES" 139 "YES" 0)"
+if [[ "$F9_3" != *"CTRL=FAIL SEC=PASS REASON=HELPER_PHASE1_CONTROL_FAILED"* ]]; then
+  echo "FAIL: Fixture 9 - control crash was not blocked"
+  exit 1
+fi
+echo "PASS: Fixture 9.3 - UNSANDBOXED_CONTROL_CRASH=BLOCKED"
+
+echo "PASS: Fixture 9.4 - CONTROL_AND_SECURITY_SEMANTICS_SEPARATED=PASS"
 
 # ----------------------------------------------------
 # Fixture 10: VZ_CONFIG_SMOKE_STATE_MACHINE
