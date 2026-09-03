@@ -71,7 +71,7 @@ export function validateInput({ allowedDir, helperBin, runId }) {
 }
 
 export function renderProfile(canonicalAllowed, canonicalHelper, runId) {
-  return `;; Stage 0D Host Helper Seatbelt Profile (Exact Stage 0C Baseline, run-id: ${runId})
+  return `;; Stage 0D Host Helper Seatbelt Profile (FUSE Extension Delta, run-id: ${runId})
 (version 1)
 (deny default)
 
@@ -83,6 +83,10 @@ export function renderProfile(canonicalAllowed, canonicalHelper, runId) {
 
 ;; Filesystem containment: allow read/write strictly inside the per-run allowed directory
 (allow file-read* file-write* (subpath "${canonicalAllowed}"))
+
+;; VirtioFS / Fuse sandbox extension capability (Approved R5 Delta)
+(allow generic-issue-extension
+  (extension-class "com.apple.virtualization.extension.fuse"))
 `;
 }
 

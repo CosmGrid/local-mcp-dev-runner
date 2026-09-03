@@ -10,24 +10,83 @@ echo "Running Stage 0D Local Fixtures"
 echo "========================================="
 
 # ----------------------------------------------------
-# Fixture 1: Exact Stage0C Profile Baseline Match
+# Fixture 1: FUSE Capability Delta & Profile Containment Check
 # ----------------------------------------------------
-STAGE0C_TEMPLATE="$HERE/../p35-stage0c/expected/profile.sb.template"
 STAGE0D_TEMPLATE="$HERE/expected/profile.sb.template"
 
-if [ ! -f "$STAGE0C_TEMPLATE" ] || [ ! -f "$STAGE0D_TEMPLATE" ]; then
+if [ ! -f "$STAGE0D_TEMPLATE" ]; then
   echo "FAIL: Fixture 1 - template file missing"
   exit 1
 fi
 
-RULES_0C=$(grep -v '^;' "$STAGE0C_TEMPLATE" | tr -d ' \n\t')
-RULES_0D=$(grep -v '^;' "$STAGE0D_TEMPLATE" | tr -d ' \n\t')
+CONTENT=$(grep -v '^;' "$STAGE0D_TEMPLATE" | tr '\n' ' ')
 
-if [ "$RULES_0C" != "$RULES_0D" ]; then
-  echo "FAIL: Fixture 1 - Stage 0D capability delta is not NONE!"
+# 1. FUSE_EXTENSION_RULE_PRESENT
+if [[ "$CONTENT" =~ \(allow[[:space:]]+generic-issue-extension[[:space:]]+\([[:space:]]*extension-class[[:space:]]+\"com\.apple\.virtualization\.extension\.fuse\"[[:space:]]*\) ]]; then
+  echo "PASS: Fixture 1.1 - FUSE_EXTENSION_RULE_PRESENT=PASS"
+else
+  echo "FAIL: Fixture 1.1 - FUSE extension rule missing or malformed"
   exit 1
 fi
-echo "PASS: Fixture 1 - STAGE0D_CAPABILITY_DELTA=NONE exact baseline match"
+
+# 2. FUSE_EXTENSION_CLASS_EXACT
+if [[ "$CONTENT" == *"\"com.apple.virtualization.extension.fuse\""* ]]; then
+  echo "PASS: Fixture 1.2 - FUSE_EXTENSION_CLASS_EXACT=PASS"
+else
+  echo "FAIL: Fixture 1.2 - FUSE extension class not exact"
+  exit 1
+fi
+
+# 3. NO_WILDCARD_EXTENSION_CLASS
+if [[ "$CONTENT" == *"(extension-class \"*\""* ]] || [[ "$CONTENT" == *"(extension-class *)"* ]]; then
+  echo "FAIL: Fixture 1.3 - wildcard extension class detected"
+  exit 1
+fi
+echo "PASS: Fixture 1.3 - NO_WILDCARD_EXTENSION_CLASS=PASS"
+
+# 4. NO_ROSETTA_EXTENSION
+if [[ "$CONTENT" == *"rosetta"* ]]; then
+  echo "FAIL: Fixture 1.4 - rosetta extension detected"
+  exit 1
+fi
+echo "PASS: Fixture 1.4 - NO_ROSETTA_EXTENSION=PASS"
+
+# 5. NO_MACH_LOOKUP_ADDED
+if [[ "$CONTENT" == *"mach-lookup"* ]]; then
+  echo "FAIL: Fixture 1.5 - mach-lookup added"
+  exit 1
+fi
+echo "PASS: Fixture 1.5 - NO_MACH_LOOKUP_ADDED=PASS"
+
+# 6. NO_SYSCTL_ADDED
+if [[ "$CONTENT" == *"sysctl"* ]]; then
+  echo "FAIL: Fixture 1.6 - sysctl added"
+  exit 1
+fi
+echo "PASS: Fixture 1.6 - NO_SYSCTL_ADDED=PASS"
+
+# 7. NO_IOKIT_ADDED
+if [[ "$CONTENT" == *"iokit"* ]]; then
+  echo "FAIL: Fixture 1.7 - iokit added"
+  exit 1
+fi
+echo "PASS: Fixture 1.7 - NO_IOKIT_ADDED=PASS"
+
+# 8. NO_NETWORK_PERMISSION_ADDED
+if [[ "$CONTENT" == *"network"* ]]; then
+  echo "FAIL: Fixture 1.8 - network added"
+  exit 1
+fi
+echo "PASS: Fixture 1.8 - NO_NETWORK_PERMISSION_ADDED=PASS"
+
+# 9. NO_FILESYSTEM_SCOPE_EXPANSION
+if [[ "$CONTENT" == *"(literal \"/\")"* ]] || [[ "$CONTENT" == *"(subpath \"/\")"* ]] || [[ "$CONTENT" == *"/private/tmp"* ]] || [[ "$CONTENT" == *"/Users"* ]]; then
+  echo "FAIL: Fixture 1.9 - filesystem scope expanded"
+  exit 1
+fi
+echo "PASS: Fixture 1.9 - NO_FILESYSTEM_SCOPE_EXPANSION=PASS"
+
+echo "PASS: Fixture 1 - STAGE0D_CAPABILITY_DELTA=FUSE_EXTENSION_ONLY verified"
 
 # ----------------------------------------------------
 # Fixture 2: Profile Generation Success

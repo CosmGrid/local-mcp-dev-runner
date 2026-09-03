@@ -10,3 +10,7 @@
 
 ;; Filesystem containment: allow read/write strictly inside the per-run allowed directory
 (allow file-read* file-write* (subpath "%%ALLOWED_DIR%%"))
+
+;; VirtioFS / Fuse sandbox extension capability (Approved R5 Delta)
+(allow generic-issue-extension
+  (extension-class "com.apple.virtualization.extension.fuse"))

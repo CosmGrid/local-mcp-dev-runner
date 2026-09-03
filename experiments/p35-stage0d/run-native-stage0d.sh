@@ -23,7 +23,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # --- Report variables with fail-closed defaults ---
 STAGE0D_RUN_ID=""
 SANDBOX_BACKEND="sandbox-exec"
-STAGE0D_CAPABILITY_DELTA="NONE"
+STAGE0D_CAPABILITY_DELTA="FUSE_EXTENSION_ONLY"
 
 PROFILE_GENERATION="NOT_RUN"
 PROFILE_PATH="NONE"
