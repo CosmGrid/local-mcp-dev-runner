@@ -391,13 +391,19 @@ classify_test_crash() {
     reason="PROFILE_TOO_NARROW"
   else
     denial="NO"
-    reason="HELPER_TEST_MODE_FAILED"
+    if [ "$signal" = "4" ]; then
+      reason="VM_START_SIGILL"
+    elif [ "$signal" = "11" ]; then
+      reason="VM_START_SIGSEGV"
+    else
+      reason="HELPER_TEST_MODE_FAILED"
+    fi
   fi
   echo "SIGNAL=$signal DENIAL=$denial REASON=$reason"
 }
 
 SIG_RES="$(classify_test_crash "Segmentation fault: 11" 139)"
-if [[ "$SIG_RES" != *"SIGNAL=11 DENIAL=NO REASON=HELPER_TEST_MODE_FAILED"* ]]; then
+if [[ "$SIG_RES" != *"SIGNAL=11 DENIAL=NO REASON=VM_START_SIGSEGV"* ]]; then
   echo "FAIL: Fixture 11 - SIGSEGV classification failed: $SIG_RES"
   exit 1
 fi
@@ -405,7 +411,17 @@ if [[ "$SIG_RES" == *"PROFILE_TOO_NARROW"* ]]; then
   echo "FAIL: Fixture 11 - SIGSEGV misclassified as PROFILE_TOO_NARROW"
   exit 1
 fi
-echo "PASS: Fixture 11 - SIGSEGV_11_CLASSIFICATION=PASS"
+
+SIGILL_RES="$(classify_test_crash "Illegal instruction: 4" 132)"
+if [[ "$SIGILL_RES" != *"SIGNAL=4 DENIAL=NO REASON=VM_START_SIGILL"* ]]; then
+  echo "FAIL: Fixture 11 - SIGILL classification failed: $SIGILL_RES"
+  exit 1
+fi
+if [[ "$SIGILL_RES" == *"PROFILE_TOO_NARROW"* ]]; then
+  echo "FAIL: Fixture 11 - SIGILL misclassified as PROFILE_TOO_NARROW"
+  exit 1
+fi
+echo "PASS: Fixture 11 - SIGILL_CLASSIFICATION=PASS"
 
 # ----------------------------------------------------
 # Fixture 12: Phase 1 Security Semantic Verification Rules
@@ -462,6 +478,44 @@ echo "PASS: Fixture 12.5 - NETWORK_DENIED_SEMANTIC=PASS"
 # 6. CHILD_DENIED_SEMANTIC
 [ "$(evaluate_probe_result "CHILD" "PASS" "INHERITS_DENIED")" = "PASS_POLICY_DENIED" ]
 echo "PASS: Fixture 12.6 - CHILD_DENIED_SEMANTIC=PASS"
+
+# ----------------------------------------------------
+# Fixture 13: VM Queue Affinity & Object Lifetime Policy
+# ----------------------------------------------------
+MAIN_SWIFT="$HERE/Sources/main.swift"
+if ! grep -q "vmCtx.vmQueue.sync {" "$MAIN_SWIFT" || \
+   ! grep -q "vmCtx.vmQueue.async {" "$MAIN_SWIFT" || \
+   ! grep -q "vm = VZVirtualMachine(configuration: vmConfig, queue: vmCtx.vmQueue)" "$MAIN_SWIFT"; then
+  echo "FAIL: Fixture 13 - VM queue affinity check failed"
+  exit 1
+fi
+echo "PASS: Fixture 13 - VM_QUEUE_POLICY=PASS"
+
+# ----------------------------------------------------
+# Fixture 14: VM Start Smoke State Machine
+# ----------------------------------------------------
+test_vm_start_smoke_sm() {
+  local u_rc="$1"
+  local s_rc="$2"
+  local s_sig="$3"
+  local reason="NONE"
+
+  if [ "$u_rc" -ne 0 ]; then
+    reason="HELPER_VM_START_FAILED_UNSANDBOXED"
+  elif [ "$s_rc" -ne 0 ]; then
+    if [ "$s_sig" = "4" ]; then
+      reason="VM_START_SIGILL"
+    else
+      reason="HELPER_VM_START_FAILED_SANDBOXED"
+    fi
+  fi
+  echo "REASON=$reason"
+}
+
+[ "$(test_vm_start_smoke_sm 1 0 "NONE")" = "REASON=HELPER_VM_START_FAILED_UNSANDBOXED" ]
+[ "$(test_vm_start_smoke_sm 0 132 "4")" = "REASON=VM_START_SIGILL" ]
+[ "$(test_vm_start_smoke_sm 0 0 "NONE")" = "REASON=NONE" ]
+echo "PASS: Fixture 14 - VM_START_SMOKE_STATE_MACHINE=PASS"
 
 echo "========================================="
 echo "ALL STAGE 0D FIXTURES PASSED"

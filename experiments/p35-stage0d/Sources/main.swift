@@ -414,7 +414,26 @@ final class VMContext {
     var serialAttachment: VZFileHandleSerialPortAttachment? = nil
     var vmConfig: VZVirtualMachineConfiguration? = nil
     var vm: VZVirtualMachine? = nil
-    let vmQueue = DispatchQueue(label: "stage0d.vm.queue")
+
+    // Full object lifecycle retention
+    var bootLoader: VZLinuxBootLoader? = nil
+    var serialPort: VZVirtioConsoleDeviceSerialPortConfiguration? = nil
+    var sharedDirectory: VZSharedDirectory? = nil
+    var singleDirectoryShare: VZSingleDirectoryShare? = nil
+    var fileSystemDevice: VZVirtioFileSystemDeviceConfiguration? = nil
+    var kernelURL: URL? = nil
+    var initrdURL: URL? = nil
+    var shareURL: URL? = nil
+
+    let vmQueueKey = DispatchSpecificKey<String>()
+    let vmQueueLabel = "com.localmcpdevrunner.stage0d.vz"
+    let vmQueue: DispatchQueue
+
+    init() {
+        let q = DispatchQueue(label: vmQueueLabel, qos: .userInitiated)
+        q.setSpecific(key: vmQueueKey, value: vmQueueLabel)
+        self.vmQueue = q
+    }
 
     deinit {
         if consoleReadFD >= 0 { close(consoleReadFD) }
@@ -424,9 +443,15 @@ final class VMContext {
 
 func buildVMConfiguration(manifest: ProbeManifest, ctx: VMContext) throws -> VZVirtualMachineConfiguration {
     fputs("VZ_BOOTLOADER_BEGIN\n", stdout); fflush(stdout)
-    let bootLoader = VZLinuxBootLoader(kernelURL: URL(fileURLWithPath: manifest.kernelPath))
+    let kURL = URL(fileURLWithPath: manifest.kernelPath)
+    let iURL = URL(fileURLWithPath: manifest.initrdPath)
+    ctx.kernelURL = kURL
+    ctx.initrdURL = iURL
+
+    let bootLoader = VZLinuxBootLoader(kernelURL: kURL)
     bootLoader.commandLine = "console=hvc0 rdinit=/stage0d-init"
-    bootLoader.initialRamdiskURL = URL(fileURLWithPath: manifest.initrdPath)
+    bootLoader.initialRamdiskURL = iURL
+    ctx.bootLoader = bootLoader
     fputs("VZ_BOOTLOADER_END\n", stdout); fflush(stdout)
 
     fputs("VZ_SERIAL_PIPE_BEGIN\n", stdout); fflush(stdout)
@@ -451,16 +476,22 @@ func buildVMConfiguration(manifest: ProbeManifest, ctx: VMContext) throws -> VZV
     fputs("VZ_SERIAL_DEVICE_BEGIN\n", stdout); fflush(stdout)
     let serialPort = VZVirtioConsoleDeviceSerialPortConfiguration()
     serialPort.attachment = serialAttachment
+    ctx.serialPort = serialPort
     fputs("VZ_SERIAL_DEVICE_END\n", stdout); fflush(stdout)
 
     fputs("VZ_VIRTIOFS_SHARE_BEGIN\n", stdout); fflush(stdout)
-    let shareDir = VZSharedDirectory(url: URL(fileURLWithPath: manifest.sharePath), readOnly: false)
+    let sURL = URL(fileURLWithPath: manifest.sharePath)
+    ctx.shareURL = sURL
+    let shareDir = VZSharedDirectory(url: sURL, readOnly: false)
     let singleShare = VZSingleDirectoryShare(directory: shareDir)
+    ctx.sharedDirectory = shareDir
+    ctx.singleDirectoryShare = singleShare
     fputs("VZ_VIRTIOFS_SHARE_END\n", stdout); fflush(stdout)
 
     fputs("VZ_VIRTIOFS_DEVICE_BEGIN\n", stdout); fflush(stdout)
     let fsDev = VZVirtioFileSystemDeviceConfiguration(tag: manifest.virtiofsTag)
     fsDev.share = singleShare
+    ctx.fileSystemDevice = fsDev
     fputs("VZ_VIRTIOFS_DEVICE_END\n", stdout); fflush(stdout)
 
     fputs("VZ_CONFIG_OBJECT_BEGIN\n", stdout); fflush(stdout)
@@ -495,6 +526,86 @@ func runVZConfigSmokeMode(manifestPath: String) {
         exit(0)
     } catch {
         print("STAGE0D_VZ_CONFIG_SMOKE_RESULT=FAIL: \(error)")
+        exit(1)
+    }
+}
+
+func runVMStartSmokeMode(manifestPath: String) {
+    guard let manifestData = try? Data(contentsOf: URL(fileURLWithPath: manifestPath)),
+          let manifest = try? JSONDecoder().decode(ProbeManifest.self, from: manifestData) else {
+        fputs("ERROR: failed to read manifest from \(manifestPath)\n", stderr)
+        exit(2)
+    }
+    fputs("STAGE0D_VM_START_SMOKE_ENTERED=YES\n", stdout); fflush(stdout)
+    let vmCtx = VMContext()
+    do {
+        let vmConfig = try buildVMConfiguration(manifest: manifest, ctx: vmCtx)
+        var vm: VZVirtualMachine!
+        vmCtx.vmQueue.sync {
+            vm = VZVirtualMachine(configuration: vmConfig, queue: vmCtx.vmQueue)
+        }
+        vmCtx.vm = vm
+
+        let startGroup = DispatchGroup()
+        startGroup.enter()
+        var startError: Error? = nil
+        fputs("STAGE0D_VM_START_ATTEMPTED=YES\n", stdout); fflush(stdout)
+        vmCtx.vmQueue.async {
+            fputs("STAGE0D_VM_START_CALLED_ON_QUEUE=YES\n", stdout); fflush(stdout)
+            vm.start { result in
+                switch result {
+                case .success:
+                    fputs("STAGE0D_VM_START_CALLBACK=SUCCESS\n", stdout); fflush(stdout)
+                case .failure(let err):
+                    fputs("STAGE0D_VM_START_CALLBACK=FAILURE: \(err.localizedDescription)\n", stdout); fflush(stdout)
+                    startError = err
+                }
+                startGroup.leave()
+            }
+        }
+        startGroup.wait()
+
+        if let err = startError {
+            fputs("STAGE0D_VM_START_SMOKE_RESULT=FAIL: \(err.localizedDescription)\n", stderr)
+            exit(1)
+        }
+
+        var isRunning = false
+        for _ in 0..<40 {
+            let grp = DispatchGroup(); grp.enter()
+            var st: VZVirtualMachine.State = .stopped
+            vmCtx.vmQueue.async { st = vm.state; grp.leave() }
+            grp.wait()
+            if st == .running {
+                isRunning = true
+                break
+            }
+            Thread.sleep(forTimeInterval: 0.1)
+        }
+
+        if isRunning {
+            fputs("STAGE0D_VM_RUNNING=YES\n", stdout); fflush(stdout)
+            let stopGroup = DispatchGroup(); stopGroup.enter()
+            vmCtx.vmQueue.async {
+                fputs("STAGE0D_VM_STOP_CALLED_ON_QUEUE=YES\n", stdout); fflush(stdout)
+                vm.stop { _ in stopGroup.leave() }
+            }
+            stopGroup.wait()
+
+            var finalSt: VZVirtualMachine.State = .stopped
+            let fGrp = DispatchGroup(); fGrp.enter()
+            vmCtx.vmQueue.async { finalSt = vm.state; fGrp.leave() }
+            fGrp.wait()
+
+            print("STAGE0D_VM_START_SMOKE_RESULT=PASS")
+            print("FINAL_VM_STATE=\(finalSt.rawValue)")
+            exit(0)
+        } else {
+            fputs("STAGE0D_VM_START_SMOKE_RESULT=FAIL: not running\n", stderr)
+            exit(1)
+        }
+    } catch {
+        fputs("STAGE0D_VM_START_SMOKE_RESULT=FAIL: \(error)\n", stderr)
         exit(1)
     }
 }
@@ -542,7 +653,10 @@ func runTestMode(manifestPath: String) {
             let vmConfig = try buildVMConfiguration(manifest: manifest, ctx: vmCtx)
             vmConfigValidate = "PASS"
 
-            let vm = VZVirtualMachine(configuration: vmConfig, queue: vmCtx.vmQueue)
+            var vm: VZVirtualMachine!
+            vmCtx.vmQueue.sync {
+                vm = VZVirtualMachine(configuration: vmConfig, queue: vmCtx.vmQueue)
+            }
             vmCtx.vm = vm
 
             // Start draining serial pipe asynchronously
@@ -563,23 +677,38 @@ func runTestMode(manifestPath: String) {
             }
 
             // Start VM on vmCtx.vmQueue
-            let startSem = DispatchSemaphore(value: 0)
+            let startGroup = DispatchGroup()
+            startGroup.enter()
             var startError: Error? = nil
 
             fputs("STAGE0D_VM_START_ATTEMPTED=YES\n", stdout); fflush(stdout)
             vmCtx.vmQueue.async {
+                fputs("STAGE0D_VM_START_CALLED_ON_QUEUE=YES\n", stdout); fflush(stdout)
                 vm.start { result in
                     switch result {
                     case .success:
-                        break
+                        fputs("STAGE0D_VM_START_CALLBACK=SUCCESS\n", stdout); fflush(stdout)
                     case .failure(let error):
+                        fputs("STAGE0D_VM_START_CALLBACK=FAILURE: \(error.localizedDescription)\n", stdout); fflush(stdout)
                         startError = error
                     }
-                    startSem.signal()
+                    startGroup.leave()
                 }
             }
+            startGroup.wait()
 
-            _ = startSem.wait(timeout: .now() + 10.0)
+            var isRunning = false
+            for _ in 0..<40 {
+                let grp = DispatchGroup(); grp.enter()
+                var st: VZVirtualMachine.State = .stopped
+                vmCtx.vmQueue.async { st = vm.state; grp.leave() }
+                grp.wait()
+                if st == .running {
+                    isRunning = true
+                    break
+                }
+                Thread.sleep(forTimeInterval: 0.1)
+            }
 
             if let err = startError {
                 vmStart = "BLOCKED"
@@ -587,7 +716,7 @@ func runTestMode(manifestPath: String) {
                 sandboxDenialEvidence = "VZVirtualMachine.start failed: \(err.localizedDescription)"
                 failedOperation = "vm.start"
                 failedServiceOrPath = "Virtualization.framework"
-            } else if vm.state == .running {
+            } else if isRunning {
                 vmStart = "PASS"
                 vmRunning = "PASS"
 
@@ -598,26 +727,39 @@ func runTestMode(manifestPath: String) {
                     Thread.sleep(forTimeInterval: 0.1)
                 }
 
-                // Stop VM
-                let stopSem = DispatchSemaphore(value: 0)
+                // Stop VM on vmQueue
+                let stopGroup = DispatchGroup()
+                stopGroup.enter()
                 var stopError: Error? = nil
-                vm.stop { err in
-                    stopError = err
-                    stopSem.signal()
+                vmCtx.vmQueue.async {
+                    fputs("STAGE0D_VM_STOP_CALLED_ON_QUEUE=YES\n", stdout); fflush(stdout)
+                    vm.stop { err in
+                        stopError = err
+                        stopGroup.leave()
+                    }
                 }
-                _ = stopSem.wait(timeout: .now() + 5.0)
+                stopGroup.wait()
 
-                if stopError == nil && vm.state == .stopped {
+                var finalState: VZVirtualMachine.State = .stopped
+                let fGrp = DispatchGroup(); fGrp.enter()
+                vmCtx.vmQueue.async { finalState = vm.state; fGrp.leave() }
+                fGrp.wait()
+
+                if stopError == nil && finalState == .stopped {
                     vmStop = "PASS"
                     vmFinalState = "stopped"
                 } else {
                     vmStop = "FAIL"
-                    vmFinalState = "\(vm.state.rawValue)"
+                    vmFinalState = "\(finalState.rawValue)"
                 }
             } else {
                 vmStart = "BLOCKED"
                 blockReason = "PROFILE_TOO_NARROW"
-                sandboxDenialEvidence = "VM state did not transition to running (state=\(vm.state.rawValue))"
+                var curState: VZVirtualMachine.State = .stopped
+                let sGrp = DispatchGroup(); sGrp.enter()
+                vmCtx.vmQueue.async { curState = vm.state; sGrp.leave() }
+                sGrp.wait()
+                sandboxDenialEvidence = "VM state did not transition to running (state=\(curState.rawValue))"
                 failedOperation = "vm.start_state_transition"
                 failedServiceOrPath = "Virtualization.framework"
             }
@@ -921,6 +1063,12 @@ func main() {
             exit(2)
         }
         runVZConfigSmokeMode(manifestPath: manifestPath)
+    } else if mode == "vm-start-smoke" {
+        if manifestPath.isEmpty {
+            fputs("Usage: stage0d-vz-tool --mode vm-start-smoke --manifest <probes.json>\n", stderr)
+            exit(2)
+        }
+        runVMStartSmokeMode(manifestPath: manifestPath)
     } else if mode == "child" {
         runChildMode(args: Array(args.dropFirst()))
     } else if mode == "validate" {

@@ -12,8 +12,11 @@
 # 3. VZ configuration smoke:
 #    - UNSANDBOXED_VZ_CONFIG_SMOKE
 #    - SANDBOXED_VZ_CONFIG_SMOKE
-# 4. Formal VM test (runs after control, security gate, and VZ config smoke pass)
-# 5. Canonical /private/tmp 8-criteria cleanup gate
+# 4. VM start smoke matrix:
+#    - UNSANDBOXED_VM_START_SMOKE
+#    - SANDBOXED_VM_START_SMOKE
+# 5. Formal VM test (runs after control, security gate, VZ config smoke, and VM start smoke pass)
+# 6. Canonical /private/tmp 8-criteria cleanup gate
 #
 # Does NOT touch production runtime, projects.json, or any managed worktree.
 set -euo pipefail
@@ -61,6 +64,13 @@ SANDBOXED_VZ_CONFIG_SMOKE="NOT_RUN"
 SANDBOXED_VZ_CONFIG_RC="NOT_RUN"
 SANDBOXED_VZ_CONFIG_SIGNAL="NONE"
 LAST_VZ_CONFIG_MARKER="NONE"
+
+UNSANDBOXED_VM_START_SMOKE="NOT_RUN"
+UNSANDBOXED_VM_START_RC="NOT_RUN"
+UNSANDBOXED_VM_START_SIGNAL="NONE"
+SANDBOXED_VM_START_SMOKE="NOT_RUN"
+SANDBOXED_VM_START_RC="NOT_RUN"
+SANDBOXED_VM_START_SIGNAL="NONE"
 
 SANDBOXED_TEST_RC="NOT_RUN"
 SANDBOXED_TEST_SIGNAL="NONE"
@@ -179,6 +189,12 @@ emit_report() {
   echo "SANDBOXED_VZ_CONFIG_RC=$SANDBOXED_VZ_CONFIG_RC"
   echo "SANDBOXED_VZ_CONFIG_SIGNAL=$SANDBOXED_VZ_CONFIG_SIGNAL"
   echo "LAST_VZ_CONFIG_MARKER=$LAST_VZ_CONFIG_MARKER"
+  echo "UNSANDBOXED_VM_START_SMOKE=$UNSANDBOXED_VM_START_SMOKE"
+  echo "UNSANDBOXED_VM_START_RC=$UNSANDBOXED_VM_START_RC"
+  echo "UNSANDBOXED_VM_START_SIGNAL=$UNSANDBOXED_VM_START_SIGNAL"
+  echo "SANDBOXED_VM_START_SMOKE=$SANDBOXED_VM_START_SMOKE"
+  echo "SANDBOXED_VM_START_RC=$SANDBOXED_VM_START_RC"
+  echo "SANDBOXED_VM_START_SIGNAL=$SANDBOXED_VM_START_SIGNAL"
   echo "SANDBOXED_TEST_RC=$SANDBOXED_TEST_RC"
   echo "SANDBOXED_TEST_SIGNAL=$SANDBOXED_TEST_SIGNAL"
   echo "HOST_CONTAINMENT_PRE_VM=$HOST_CONTAINMENT_PRE_VM"
@@ -257,6 +273,10 @@ cleanup() {
       cat "$CANONICAL_RUN_DIR/unsandboxed-vz-config.log" 2>/dev/null || echo "(no log)"
       echo "=== SANDBOXED VZ CONFIG SMOKE ==="
       cat "$CANONICAL_RUN_DIR/sandboxed-vz-config.log" 2>/dev/null || echo "(no log)"
+      echo "=== UNSANDBOXED VM START SMOKE ==="
+      cat "$CANONICAL_RUN_DIR/unsandboxed-vm-start.log" 2>/dev/null || echo "(no log)"
+      echo "=== SANDBOXED VM START SMOKE ==="
+      cat "$CANONICAL_RUN_DIR/sandboxed-vm-start.log" 2>/dev/null || echo "(no log)"
       echo "=== SANDBOXED TEST RUNNER OUTPUT ==="
       cat "$CANONICAL_RUN_DIR/.stage0d-runner.json" 2>/dev/null || echo "(no log)"
     } >> "$dbg_log" 2>/dev/null || true
@@ -333,8 +353,19 @@ cleanup() {
             BLOCK_REASON="HELPER_VZ_CONFIG_FAILED_UNSANDBOXED" ;;
           SANDBOXED_VZ_CONFIG)
             BLOCK_REASON="HELPER_VZ_CONFIG_FAILED_SANDBOXED" ;;
+          UNSANDBOXED_VM_START)
+            BLOCK_REASON="HELPER_VM_START_FAILED_UNSANDBOXED" ;;
+          SANDBOXED_VM_START)
+            BLOCK_REASON="HELPER_VM_START_FAILED_SANDBOXED" ;;
           SANDBOX_EXEC)
-            BLOCK_REASON="HELPER_TEST_MODE_FAILED" ;;
+            if [ "$SANDBOXED_TEST_SIGNAL" = "4" ]; then
+              BLOCK_REASON="VM_START_SIGILL"
+            elif [ "$SANDBOXED_TEST_SIGNAL" = "11" ]; then
+              BLOCK_REASON="VM_START_SIGSEGV"
+            else
+              BLOCK_REASON="HELPER_TEST_MODE_FAILED"
+            fi
+            ;;
           REPORT_PARSE)
             BLOCK_REASON="REPORT_PARSE_FAILED" ;;
           *)
@@ -715,7 +746,55 @@ else
   exit 2
 fi
 
-# =================== 9. Formal Test Mode Under sandbox-exec ===================
+# =================== 9. VM Start Smoke Matrix ===================
+CURRENT_STAGE="UNSANDBOXED_VM_START"
+UNSANDBOXED_VM_START_LOG="$CANONICAL_RUN_DIR/unsandboxed-vm-start.log"
+set +e
+"$STAGED_HELPER" --mode vm-start-smoke --manifest "$PROBES_FILE" > "$UNSANDBOXED_VM_START_LOG" 2>&1
+UNSANDBOXED_VM_START_RC=$?
+set -e
+UNSANDBOXED_VM_START_SIGNAL="$(compute_signal "$UNSANDBOXED_VM_START_RC")"
+
+if [ "$UNSANDBOXED_VM_START_RC" -eq 0 ] && grep -q "STAGE0D_VM_START_SMOKE_RESULT=PASS" "$UNSANDBOXED_VM_START_LOG"; then
+  UNSANDBOXED_VM_START_SMOKE="PASS"
+else
+  UNSANDBOXED_VM_START_SMOKE="FAIL"
+  BLOCK_REASON="HELPER_VM_START_FAILED_UNSANDBOXED"
+  STAGE0D_RESULT="BLOCKED"
+  exit 2
+fi
+
+CURRENT_STAGE="SANDBOXED_VM_START"
+SANDBOXED_VM_START_LOG="$CANONICAL_RUN_DIR/sandboxed-vm-start.log"
+set +e
+sandbox-exec -f "$PROFILE_PATH" \
+  "$STAGED_HELPER" --mode vm-start-smoke --manifest "$PROBES_FILE" > "$SANDBOXED_VM_START_LOG" 2>&1
+SANDBOXED_VM_START_RC=$?
+set -e
+SANDBOXED_VM_START_SIGNAL="$(compute_signal "$SANDBOXED_VM_START_RC")"
+
+if [ "$SANDBOXED_VM_START_RC" -eq 0 ] && grep -q "STAGE0D_VM_START_SMOKE_RESULT=PASS" "$SANDBOXED_VM_START_LOG"; then
+  SANDBOXED_VM_START_SMOKE="PASS"
+else
+  SANDBOXED_VM_START_SMOKE="FAIL"
+  if grep -iE "deny|operation not permitted|sandbox" "$SANDBOXED_VM_START_LOG" >/dev/null 2>&1; then
+    SANDBOX_DENIAL_EVIDENCE="YES"
+    DENIAL_OPERATION="sandbox-exec:vm-start-smoke"
+    DENIAL_PATH_OR_SERVICE="virtualization-runtime"
+    BLOCK_REASON="PROFILE_TOO_NARROW"
+  else
+    SANDBOX_DENIAL_EVIDENCE="NO"
+    if [ "$SANDBOXED_VM_START_SIGNAL" = "4" ]; then
+      BLOCK_REASON="VM_START_SIGILL"
+    else
+      BLOCK_REASON="HELPER_VM_START_FAILED_SANDBOXED"
+    fi
+  fi
+  STAGE0D_RESULT="BLOCKED"
+  exit 2
+fi
+
+# =================== 10. Formal Test Mode Under sandbox-exec ===================
 CURRENT_STAGE="SANDBOX_EXEC"
 RUNNER_OUTPUT_FILE="$CANONICAL_RUN_DIR/.stage0d-runner.json"
 
@@ -738,7 +817,13 @@ if [ -z "$OUTPUT_JSON" ] || ! echo "$OUTPUT_JSON" | grep -q "HOST_CONTAINMENT_PR
     BLOCK_REASON="PROFILE_TOO_NARROW"
   else
     SANDBOX_DENIAL_EVIDENCE="NO"
-    BLOCK_REASON="HELPER_TEST_MODE_FAILED"
+    if [ "$SANDBOXED_TEST_SIGNAL" = "4" ]; then
+      BLOCK_REASON="VM_START_SIGILL"
+    elif [ "$SANDBOXED_TEST_SIGNAL" = "11" ]; then
+      BLOCK_REASON="VM_START_SIGSEGV"
+    else
+      BLOCK_REASON="HELPER_TEST_MODE_FAILED"
+    fi
   fi
   STAGE0D_RESULT="BLOCKED"
   exit 2
