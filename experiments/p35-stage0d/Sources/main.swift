@@ -355,6 +355,7 @@ func runTestMode(manifestPath: String) {
     var report: [String: Any] = [:]
 
     // ----------------- Phase 1: Pre-VM Host Containment -----------------
+    fputs("STAGE0D_PHASE1_ENTERED=YES\n", stdout); fflush(stdout)
     let (phase1Map, phase1Pass) = runHostContainmentProbes(manifest: manifest, phasePrefix: "PRE_VM")
     for (k, v) in phase1Map { report[k] = v }
     report["HOST_CONTAINMENT_PRE_VM"] = phase1Pass ? "PASS" : "FAIL"
@@ -382,6 +383,7 @@ func runTestMode(manifestPath: String) {
         report["BLOCK_REASON"] = blockReason
     } else {
         do {
+            fputs("STAGE0D_VZ_CONFIG_ENTERED=YES\n", stdout); fflush(stdout)
             let bootLoader = VZLinuxBootLoader(kernelURL: URL(fileURLWithPath: manifest.kernelPath))
             bootLoader.commandLine = "console=hvc0 rdinit=/stage0d-init"
             bootLoader.initialRamdiskURL = URL(fileURLWithPath: manifest.initrdPath)
@@ -436,6 +438,7 @@ func runTestMode(manifestPath: String) {
             let startSem = DispatchSemaphore(value: 0)
             var startError: Error? = nil
 
+            fputs("STAGE0D_VM_START_ATTEMPTED=YES\n", stdout); fflush(stdout)
             vm.start { result in
                 switch result {
                 case .success:
@@ -669,6 +672,7 @@ func runValidateMode(args: [String]) {
 }
 
 func main() {
+    fputs("STAGE0D_MAIN_ENTERED=YES\n", stdout); fflush(stdout)
     let args = CommandLine.arguments
     var mode = "test"
     var manifestPath = ""
@@ -685,8 +689,15 @@ func main() {
             i += 1
         }
     }
+    fputs("STAGE0D_ARGS_PARSED=YES\n", stdout); fflush(stdout)
 
-    if mode == "child" {
+    if mode == "startup-smoke" {
+        fputs("STAGE0D_STARTUP_SMOKE_ENTERED=YES\n", stdout)
+        print("STAGE0D_HELPER_PID=\(getpid())")
+        print("STAGE0D_HELPER_MAIN_ENTERED=YES")
+        fflush(stdout)
+        exit(0)
+    } else if mode == "child" {
         runChildMode(args: Array(args.dropFirst()))
     } else if mode == "validate" {
         runValidateMode(args: Array(args.dropFirst()))
@@ -695,6 +706,7 @@ func main() {
             fputs("Usage: stage0d-vz-tool --mode test --manifest <probes.json>\n", stderr)
             exit(2)
         }
+        fputs("STAGE0D_TEST_MODE_ENTERED=YES\n", stdout); fflush(stdout)
         runTestMode(manifestPath: manifestPath)
     }
 }

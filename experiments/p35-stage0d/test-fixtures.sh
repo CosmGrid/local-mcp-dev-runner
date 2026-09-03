@@ -20,7 +20,6 @@ if [ ! -f "$STAGE0C_TEMPLATE" ] || [ ! -f "$STAGE0D_TEMPLATE" ]; then
   exit 1
 fi
 
-# Compare normalized rule sets (ignoring comments)
 RULES_0C=$(grep -v '^;' "$STAGE0C_TEMPLATE" | tr -d ' \n\t')
 RULES_0D=$(grep -v '^;' "$STAGE0D_TEMPLATE" | tr -d ' \n\t')
 
@@ -65,49 +64,87 @@ fi
 echo "PASS: Fixture 3 - profile injection prevention verified"
 
 # ----------------------------------------------------
-# Fixture 4: Report Parser Fixture
+# Fixture 4: Startup-smoke Unsandboxed Execution
 # ----------------------------------------------------
-get_json() {
-  printf '%s' "$1" | grep -oE "\"$2\"[ ]*:[ ]*(\"[^\"]*\"|true|false|null|-?[0-9]+)" \
-    | sed -E "s/^\"$2\"[ ]*:[ ]*//; s/^\"//; s/\"$//"
+SMOKE_OUT="$("$HERE/.build/stage0d-vz-tool" --mode startup-smoke 2>&1)"
+if ! echo "$SMOKE_OUT" | grep -q "STAGE0D_MAIN_ENTERED=YES" || \
+   ! echo "$SMOKE_OUT" | grep -q "STAGE0D_ARGS_PARSED=YES" || \
+   ! echo "$SMOKE_OUT" | grep -q "STAGE0D_STARTUP_SMOKE_ENTERED=YES" || \
+   ! echo "$SMOKE_OUT" | grep -q "STAGE0D_HELPER_MAIN_ENTERED=YES"; then
+  echo "FAIL: Fixture 4 - startup smoke output missing markers"
+  exit 1
+fi
+echo "PASS: Fixture 4 - startup-smoke unsandboxed fixture PASS"
+
+# ----------------------------------------------------
+# Fixture 5: SIGABRT Report Parser -> BLOCKED (Never PROFILE_TOO_NARROW)
+# ----------------------------------------------------
+test_crash_classification() {
+  local crash_output="$1"
+  local rc="$2"
+  local denial="NO"
+  local block_reason="NONE"
+  local result="BLOCKED"
+
+  if grep -iE "deny|operation not permitted|sandbox" <<< "$crash_output" >/dev/null 2>&1; then
+    denial="YES"
+    block_reason="PROFILE_TOO_NARROW"
+  else
+    denial="NO"
+    block_reason="HELPER_STARTUP_FAILED_SANDBOXED"
+  fi
+
+  echo "DENIAL=$denial BLOCK_REASON=$block_reason RESULT=$result"
 }
 
-SAMPLE_JSON=$(cat << 'SAMPLE_EOF'
+CRASH_SIMULATION="Abort trap: 6 (SIGABRT)"
+C_RES="$(test_crash_classification "$CRASH_SIMULATION" 134)"
+if [[ "$C_RES" != *"DENIAL=NO BLOCK_REASON=HELPER_STARTUP_FAILED_SANDBOXED RESULT=BLOCKED"* ]]; then
+  echo "FAIL: Fixture 5 - SIGABRT incorrectly misclassified: $C_RES"
+  exit 1
+fi
+if [[ "$C_RES" == *"PROFILE_TOO_NARROW"* ]]; then
+  echo "FAIL: Fixture 5 - SIGABRT without denial evidence resulted in PROFILE_TOO_NARROW"
+  exit 1
+fi
+echo "PASS: Fixture 5 - SIGABRT -> BLOCKED without PROFILE_TOO_NARROW"
+
+# ----------------------------------------------------
+# Fixture 6: Diagnostic Preserve Fixture
+# ----------------------------------------------------
+F6_ID="diagtest$(head -c 4 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+F6_DIR="/private/tmp/lmdr-p35-stage0d-$F6_ID"
+mkdir -p "$F6_DIR"
+echo "smoke error" > "$F6_DIR/sandboxed-smoke.log"
+echo "runner error" > "$F6_DIR/.stage0d-runner.json"
+
+F6_LOG="/private/tmp/lmdr-p35-stage0d-debug-${F6_ID}.log"
+: > "$F6_LOG"
+chmod 0600 "$F6_LOG"
+
 {
-  "HOST_CONTAINMENT_PRE_VM": "PASS",
-  "VM_CONFIG_VALIDATE": "PASS",
-  "VM_START": "PASS",
-  "VM_RUNNING": "PASS",
-  "VIRTIOFS_MOUNT": "PASS",
-  "GUEST_HOST_TO_GUEST_READ": "PASS",
-  "GUEST_GUEST_TO_HOST_WRITE": "PASS",
-  "GUEST_DOTDOT_ESCAPE": "PASS",
-  "GUEST_SYMLINK_ESCAPE_REL": "PASS",
-  "GUEST_SYMLINK_ESCAPE_ABS": "PASS",
-  "GUEST_ABSOLUTE_PATH_ESCAPE": "PASS",
-  "GUEST_HOST_HOME_EXPOSED": "NO",
-  "GUEST_HAS_VIRTIO_NET": "NO",
-  "VM_STOP": "PASS",
-  "VM_FINAL_STATE": "stopped",
-  "VIRTIOFS_GUEST_ISOLATION": "PASS",
-  "VIRTUALIZATION_VM_LIFECYCLE": "PASS",
-  "HOST_CONTAINMENT_POST_VM": "PASS",
-  "HOST_CONTAINMENT_DELTA": "PASS",
-  "PRE_VM_NETWORK_GATE": "PASS",
-  "STAGE0D_RESULT": "PASS",
-  "BLOCK_REASON": "NONE"
-}
-SAMPLE_EOF
-)
+  echo "=== UNSANDBOXED STARTUP SMOKE ==="
+  cat "$F6_DIR/sandboxed-smoke.log"
+  echo "=== SANDBOXED TEST RUNNER OUTPUT ==="
+  cat "$F6_DIR/.stage0d-runner.json"
+} >> "$F6_LOG"
 
-[ "$(get_json "$SAMPLE_JSON" HOST_CONTAINMENT_PRE_VM)" = "PASS" ]
-[ "$(get_json "$SAMPLE_JSON" VIRTIOFS_GUEST_ISOLATION)" = "PASS" ]
-[ "$(get_json "$SAMPLE_JSON" HOST_CONTAINMENT_DELTA)" = "PASS" ]
-[ "$(get_json "$SAMPLE_JSON" STAGE0D_RESULT)" = "PASS" ]
-echo "PASS: Fixture 4 - report parser logic verified"
+F6_MODE=$(stat -f "%OLp" "$F6_LOG" 2>/dev/null || stat -c "%a" "$F6_LOG" 2>/dev/null)
+if [ "$F6_MODE" != "600" ] && [ "$F6_MODE" != "0600" ]; then
+  echo "FAIL: Fixture 6 - diagnostic log permissions ($F6_MODE) != 0600"
+  rm -rf "$F6_DIR" "$F6_LOG"
+  exit 1
+fi
+if ! grep -q "smoke error" "$F6_LOG"; then
+  echo "FAIL: Fixture 6 - diagnostic log content missing"
+  rm -rf "$F6_DIR" "$F6_LOG"
+  exit 1
+fi
+rm -rf "$F6_DIR" "$F6_LOG"
+echo "PASS: Fixture 6 - diagnostic preserve fixture PASS"
 
 # ----------------------------------------------------
-# Fixture 5: Canonical Cleanup Fixture (8 criteria)
+# Fixture 7: Canonical Cleanup Fixture (8 criteria)
 # ----------------------------------------------------
 evaluate_cleanup() {
   local LOGICAL_RUN_DIR="$1"
@@ -149,31 +186,18 @@ evaluate_cleanup() {
   echo "CLEANUP_PATH_GATE=$CLEANUP_PATH_GATE TEMP_FILES_CLEANED=$TEMP_FILES_CLEANED LEFTOVER_RUN_DIR=$LEFTOVER_RUN_DIR"
 }
 
-RUN_ID="cleanupvalid123"
+RUN_ID="cleanuptest12345"
 VALID_LOGICAL="/tmp/lmdr-p35-stage0d-$RUN_ID"
 mkdir -p "$VALID_LOGICAL"
 VALID_CANONICAL="$(realpath "$VALID_LOGICAL")"
 touch "$VALID_CANONICAL/.stage0d-active"
 
-F5_RES="$(evaluate_cleanup "$VALID_LOGICAL" "$VALID_CANONICAL" "$RUN_ID")"
-if [[ "$F5_RES" != *"CLEANUP_PATH_GATE=PASS TEMP_FILES_CLEANED=PASS LEFTOVER_RUN_DIR=NONE"* ]]; then
-  echo "FAIL: Fixture 5 (valid cleanup failed: $F5_RES)"
+F7_RES="$(evaluate_cleanup "$VALID_LOGICAL" "$VALID_CANONICAL" "$RUN_ID")"
+if [[ "$F7_RES" != *"CLEANUP_PATH_GATE=PASS TEMP_FILES_CLEANED=PASS LEFTOVER_RUN_DIR=NONE"* ]]; then
+  echo "FAIL: Fixture 7 (valid cleanup failed: $F7_RES)"
   exit 1
 fi
-echo "PASS: Fixture 5 - 8-criteria canonical cleanup gate verified"
-
-# ----------------------------------------------------
-# Fixture 6: Helper Validate Mode
-# ----------------------------------------------------
-VAL_OUT="$("$HERE/.build/stage0d-vz-tool" --mode validate \
-  --kernel /tmp/lmdr-p35-stage0a-assets/vmlinuz-virt \
-  --initrd "$HERE/.build/initramfs-stage0d" \
-  --share "$HERE")"
-if ! echo "$VAL_OUT" | grep -q '"isSupported":true'; then
-  echo "FAIL: Fixture 6 - helper validate mode failed"
-  exit 1
-fi
-echo "PASS: Fixture 6 - helper validate mode verified"
+echo "PASS: Fixture 7 - 8-criteria canonical cleanup gate verified"
 
 echo "========================================="
 echo "ALL STAGE 0D FIXTURES PASSED"

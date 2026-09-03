@@ -6,12 +6,14 @@
 # 1. Helper executed strictly from allowed/helper/
 # 2. VirtioFS shares strictly allowed/share/ (never allowed/)
 # 3. Helper output strictly STDOUT_ONLY captured to .stage0d-runner.json
-# 4. Phase 1: Pre-VM Host Containment Probes
-# 5. Phase 2: Virtualization.framework VM lifecycle + VirtioFS Guest Isolation
-# 6. Phase 3: Post-VM Host Containment Probes
-# 7. Delta Gate: Pre-VM vs Post-VM strict equivalence
-# 8. Loopback TCP network gate (control vs sandboxed deny)
-# 9. Canonical /private/tmp 8-criteria cleanup gate
+# 4. Startup matrix:
+#    - UNSANDBOXED_STARTUP_SMOKE (stage0d-vz-tool --mode startup-smoke)
+#    - SANDBOXED_STARTUP_SMOKE (sandbox-exec EXACT profile --mode startup-smoke)
+#    - Formal --mode test only if sandboxed smoke PASS
+# 5. Accurate exit code and signal reporting (SIGABRT -> signal 6)
+# 6. Distinct separation of crash vs Seatbelt denial evidence
+# 7. Diagnostic log preservation (PRESERVE_STAGE0D_DIAGNOSTICS=1)
+# 8. Canonical /private/tmp 8-criteria cleanup gate
 #
 # Does NOT touch production runtime, projects.json, or any managed worktree.
 set -euo pipefail
@@ -36,6 +38,15 @@ HELPER_OUTPUT_MODEL="STDOUT_ONLY"
 
 PROFILE_INPUT_VALIDATION_GATE="NOT_RUN"
 PROFILE_INJECTION_GATE="NOT_RUN"
+
+UNSANDBOXED_STARTUP_SMOKE="NOT_RUN"
+UNSANDBOXED_STARTUP_RC="NOT_RUN"
+SANDBOXED_STARTUP_SMOKE="NOT_RUN"
+SANDBOXED_STARTUP_RC="NOT_RUN"
+SANDBOXED_STARTUP_SIGNAL="NONE"
+
+SANDBOXED_TEST_RC="NOT_RUN"
+SANDBOXED_TEST_SIGNAL="NONE"
 
 HOST_CONTAINMENT_PRE_VM="NOT_RUN"
 
@@ -68,9 +79,16 @@ GUEST_NETWORK_GATE="NOT_RUN"
 
 FRAMEWORK_WORKER_TRUST_BOUNDARY="TRUSTED_OS_SERVICE_OUTSIDE_HELPER_SEATBELT"
 
-SANDBOX_DENIAL_EVIDENCE="NONE"
+SANDBOX_DENIAL_EVIDENCE="NO"
+DENIAL_OPERATION="NONE"
+DENIAL_PATH_OR_SERVICE="NONE"
 FAILED_OPERATION="NONE"
 FAILED_SERVICE_OR_PATH="NONE"
+
+DIAGNOSTIC_LOG_PRESERVED="NO"
+DIAGNOSTIC_LOG_PATH="NONE"
+DIAGNOSTIC_LOG_SHA256="NONE"
+DIAGNOSTIC_LOG_BYTES=0
 
 CLEANUP_PATH_GATE="FAIL"
 TEMP_FILES_CLEANED="FAIL"
@@ -90,12 +108,20 @@ CURRENT_STAGE="BOOTSTRAP"
 LOGICAL_RUN_DIR=""
 CANONICAL_RUN_DIR=""
 LISTENER_PID=""
-HELPER_PID=""
 
 # --- helpers ---
 get_json() {
   printf '%s' "$1" | grep -oE "\"$2\"[ ]*:[ ]*(\"[^\"]*\"|true|false|null|-?[0-9]+)" \
     | sed -E "s/^\"$2\"[ ]*:[ ]*//; s/^\"//; s/\"$//"
+}
+
+compute_signal() {
+  local rc="$1"
+  if [ "$rc" -gt 128 ] && [ "$rc" -le 192 ]; then
+    echo "$((rc - 128))"
+  else
+    echo "NONE"
+  fi
 }
 
 emit_report() {
@@ -117,6 +143,13 @@ emit_report() {
   echo "HELPER_OUTPUT_MODEL=$HELPER_OUTPUT_MODEL"
   echo "PROFILE_INPUT_VALIDATION_GATE=$PROFILE_INPUT_VALIDATION_GATE"
   echo "PROFILE_INJECTION_GATE=$PROFILE_INJECTION_GATE"
+  echo "UNSANDBOXED_STARTUP_SMOKE=$UNSANDBOXED_STARTUP_SMOKE"
+  echo "UNSANDBOXED_STARTUP_RC=$UNSANDBOXED_STARTUP_RC"
+  echo "SANDBOXED_STARTUP_SMOKE=$SANDBOXED_STARTUP_SMOKE"
+  echo "SANDBOXED_STARTUP_RC=$SANDBOXED_STARTUP_RC"
+  echo "SANDBOXED_STARTUP_SIGNAL=$SANDBOXED_STARTUP_SIGNAL"
+  echo "SANDBOXED_TEST_RC=$SANDBOXED_TEST_RC"
+  echo "SANDBOXED_TEST_SIGNAL=$SANDBOXED_TEST_SIGNAL"
   echo "HOST_CONTAINMENT_PRE_VM=$HOST_CONTAINMENT_PRE_VM"
   echo "VM_CONFIG_VALIDATE=$VM_CONFIG_VALIDATE"
   echo "VM_START=$VM_START"
@@ -141,8 +174,14 @@ emit_report() {
   echo "GUEST_NETWORK_GATE=$GUEST_NETWORK_GATE"
   echo "FRAMEWORK_WORKER_TRUST_BOUNDARY=$FRAMEWORK_WORKER_TRUST_BOUNDARY"
   echo "SANDBOX_DENIAL_EVIDENCE=$SANDBOX_DENIAL_EVIDENCE"
+  echo "DENIAL_OPERATION=$DENIAL_OPERATION"
+  echo "DENIAL_PATH_OR_SERVICE=$DENIAL_PATH_OR_SERVICE"
   echo "FAILED_OPERATION=$FAILED_OPERATION"
   echo "FAILED_SERVICE_OR_PATH=$FAILED_SERVICE_OR_PATH"
+  echo "DIAGNOSTIC_LOG_PRESERVED=$DIAGNOSTIC_LOG_PRESERVED"
+  echo "DIAGNOSTIC_LOG_PATH=$DIAGNOSTIC_LOG_PATH"
+  echo "DIAGNOSTIC_LOG_SHA256=$DIAGNOSTIC_LOG_SHA256"
+  echo "DIAGNOSTIC_LOG_BYTES=$DIAGNOSTIC_LOG_BYTES"
   echo "CLEANUP_PATH_GATE=$CLEANUP_PATH_GATE"
   echo "TEMP_FILES_CLEANED=$TEMP_FILES_CLEANED"
   echo "LEFTOVER_RUN_DIR=$LEFTOVER_RUN_DIR"
@@ -166,6 +205,29 @@ cleanup() {
       kill -9 "$LISTENER_PID" 2>/dev/null || true
     fi
     LISTENER_PID=""
+  fi
+
+  # Preserve diagnostic log if requested: PRESERVE_STAGE0D_DIAGNOSTICS=1
+  if [ "${PRESERVE_STAGE0D_DIAGNOSTICS:-0}" = "1" ] && [ -n "${CANONICAL_RUN_DIR:-}" ] && [ -n "${STAGE0D_RUN_ID:-}" ]; then
+    local dbg_log="/private/tmp/lmdr-p35-stage0d-debug-${STAGE0D_RUN_ID}.log"
+    : > "$dbg_log" 2>/dev/null || true
+    chmod 0600 "$dbg_log" 2>/dev/null || true
+
+    {
+      echo "=== UNSANDBOXED STARTUP SMOKE ==="
+      cat "$CANONICAL_RUN_DIR/unsandboxed-smoke.log" 2>/dev/null || echo "(no log)"
+      echo "=== SANDBOXED STARTUP SMOKE ==="
+      cat "$CANONICAL_RUN_DIR/sandboxed-smoke.log" 2>/dev/null || echo "(no log)"
+      echo "=== SANDBOXED TEST RUNNER OUTPUT ==="
+      cat "$CANONICAL_RUN_DIR/.stage0d-runner.json" 2>/dev/null || echo "(no log)"
+    } >> "$dbg_log" 2>/dev/null || true
+
+    if [ -s "$dbg_log" ]; then
+      DIAGNOSTIC_LOG_PRESERVED="YES"
+      DIAGNOSTIC_LOG_PATH="$dbg_log"
+      DIAGNOSTIC_LOG_SHA256="$(shasum -a 256 "$dbg_log" 2>/dev/null | awk '{print $1}')"
+      DIAGNOSTIC_LOG_BYTES="$(stat -f "%z" "$dbg_log" 2>/dev/null || wc -c < "$dbg_log" 2>/dev/null || echo 0)"
+    fi
   fi
 
   CLEANUP_PATH_GATE="FAIL"
@@ -220,8 +282,12 @@ cleanup() {
             BLOCK_REASON="PROBES_MANIFEST_FAILED" ;;
           PROFILE_GENERATION)
             BLOCK_REASON="PROFILE_GENERATION_FAILED" ;;
+          UNSANDBOXED_SMOKE)
+            BLOCK_REASON="HELPER_STARTUP_FAILED_UNSANDBOXED" ;;
+          SANDBOXED_SMOKE)
+            BLOCK_REASON="HELPER_STARTUP_FAILED_SANDBOXED" ;;
           SANDBOX_EXEC)
-            BLOCK_REASON="SANDBOX_LAUNCH_FAILED" ;;
+            BLOCK_REASON="HELPER_TEST_MODE_FAILED" ;;
           REPORT_PARSE)
             BLOCK_REASON="REPORT_PARSE_FAILED" ;;
           *)
@@ -462,21 +528,77 @@ else
   exit 2
 fi
 
-# =================== 6. Run Helper Under sandbox-exec ===================
+# =================== 6. Startup Diagnostics Matrix ===================
+CURRENT_STAGE="UNSANDBOXED_SMOKE"
+UNSANDBOXED_SMOKE_LOG="$CANONICAL_RUN_DIR/unsandboxed-smoke.log"
+set +e
+"$STAGED_HELPER" --mode startup-smoke > "$UNSANDBOXED_SMOKE_LOG" 2>&1
+UNSANDBOXED_STARTUP_RC=$?
+set -e
+
+if [ "$UNSANDBOXED_STARTUP_RC" -eq 0 ] && grep -q "STAGE0D_HELPER_MAIN_ENTERED=YES" "$UNSANDBOXED_SMOKE_LOG"; then
+  UNSANDBOXED_STARTUP_SMOKE="PASS"
+else
+  UNSANDBOXED_STARTUP_SMOKE="FAIL"
+  BLOCK_REASON="HELPER_STARTUP_FAILED_UNSANDBOXED"
+  STAGE0D_RESULT="BLOCKED"
+  exit 2
+fi
+
+CURRENT_STAGE="SANDBOXED_SMOKE"
+SANDBOXED_SMOKE_LOG="$CANONICAL_RUN_DIR/sandboxed-smoke.log"
+set +e
+sandbox-exec -f "$PROFILE_PATH" \
+  "$STAGED_HELPER" --mode startup-smoke > "$SANDBOXED_SMOKE_LOG" 2>&1
+SANDBOXED_STARTUP_RC=$?
+set -e
+
+SANDBOXED_STARTUP_SIGNAL="$(compute_signal "$SANDBOXED_STARTUP_RC")"
+
+if [ "$SANDBOXED_STARTUP_RC" -eq 0 ] && grep -q "STAGE0D_HELPER_MAIN_ENTERED=YES" "$SANDBOXED_SMOKE_LOG"; then
+  SANDBOXED_STARTUP_SMOKE="PASS"
+else
+  SANDBOXED_STARTUP_SMOKE="FAIL"
+  # Check if there is explicit Seatbelt denial evidence in output
+  if grep -iE "deny|operation not permitted|sandbox" "$SANDBOXED_SMOKE_LOG" >/dev/null 2>&1; then
+    SANDBOX_DENIAL_EVIDENCE="YES"
+    DENIAL_OPERATION="sandbox-exec:startup-smoke"
+    DENIAL_PATH_OR_SERVICE="system-service"
+    BLOCK_REASON="PROFILE_TOO_NARROW"
+  else
+    SANDBOX_DENIAL_EVIDENCE="NO"
+    BLOCK_REASON="HELPER_STARTUP_FAILED_SANDBOXED"
+  fi
+  STAGE0D_RESULT="BLOCKED"
+  exit 2
+fi
+
+# =================== 7. Formal Test Mode Under sandbox-exec ===================
 CURRENT_STAGE="SANDBOX_EXEC"
 RUNNER_OUTPUT_FILE="$CANONICAL_RUN_DIR/.stage0d-runner.json"
 
 set +e
 sandbox-exec -f "$PROFILE_PATH" \
   "$STAGED_HELPER" --mode test --manifest "$PROBES_FILE" > "$RUNNER_OUTPUT_FILE" 2>&1
-HELPER_EXIT=$?
+SANDBOXED_TEST_RC=$?
 set -e
+
+SANDBOXED_TEST_SIGNAL="$(compute_signal "$SANDBOXED_TEST_RC")"
 
 CURRENT_STAGE="REPORT_PARSE"
 OUTPUT_JSON="$(cat "$RUNNER_OUTPUT_FILE" 2>/dev/null || echo "")"
 
 if [ -z "$OUTPUT_JSON" ] || ! echo "$OUTPUT_JSON" | grep -q "HOST_CONTAINMENT_PRE_VM"; then
-  BLOCK_REASON="SANDBOX_LAUNCH_FAILED"
+  # Inspect if test mode crashed with denial evidence
+  if grep -iE "deny|operation not permitted|sandbox" "$RUNNER_OUTPUT_FILE" >/dev/null 2>&1; then
+    SANDBOX_DENIAL_EVIDENCE="YES"
+    DENIAL_OPERATION="sandbox-exec:test-mode"
+    DENIAL_PATH_OR_SERVICE="system-service"
+    BLOCK_REASON="PROFILE_TOO_NARROW"
+  else
+    SANDBOX_DENIAL_EVIDENCE="NO"
+    BLOCK_REASON="HELPER_TEST_MODE_FAILED"
+  fi
   STAGE0D_RESULT="BLOCKED"
   exit 2
 fi
