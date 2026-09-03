@@ -261,10 +261,38 @@ func runHostContainmentProbes(manifest: ProbeManifest, phasePrefix: String) -> (
         let childExit = childProc.terminationStatus
         if childExit == 0 {
             let childData = pipe.fileHandleForReading.readDataToEndOfFile()
-            if let childRes = try? JSONDecoder().decode(ChildProbeResult.self, from: childData) {
-                phaseMap["\(phasePrefix)_CHILD_ALLOWED_READ"] = childRes.childAllowedRead
-                phaseMap["\(phasePrefix)_CHILD_DENIED_SENTINEL_READ"] = childRes.childDeniedSentinelRead
-                phaseMap["\(phasePrefix)_CHILD_CONTAINMENT"] = childRes.childInheritsContainment
+            if let rawOutput = String(data: childData, encoding: .utf8) {
+                var decodedRes: ChildProbeResult? = nil
+                for line in rawOutput.split(separator: "\n") {
+                    let trimmedLine = line.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if trimmedLine.hasPrefix("CHILD_PROBE_JSON=") {
+                        let jsonPart = String(trimmedLine.dropFirst("CHILD_PROBE_JSON=".count))
+                        if let d = jsonPart.data(using: .utf8),
+                           let res = try? JSONDecoder().decode(ChildProbeResult.self, from: d) {
+                            decodedRes = res
+                            break
+                        }
+                    }
+                }
+                if decodedRes == nil,
+                   let s = rawOutput.range(of: "{"),
+                   let e = rawOutput.range(of: "}", options: .backwards) {
+                    let sub = String(rawOutput[s.lowerBound...e.upperBound])
+                    if let d = sub.data(using: .utf8),
+                       let res = try? JSONDecoder().decode(ChildProbeResult.self, from: d) {
+                        decodedRes = res
+                    }
+                }
+
+                if let childRes = decodedRes {
+                    phaseMap["\(phasePrefix)_CHILD_ALLOWED_READ"] = childRes.childAllowedRead
+                    phaseMap["\(phasePrefix)_CHILD_DENIED_SENTINEL_READ"] = childRes.childDeniedSentinelRead
+                    phaseMap["\(phasePrefix)_CHILD_CONTAINMENT"] = childRes.childInheritsContainment
+                } else {
+                    phaseMap["\(phasePrefix)_CHILD_ALLOWED_READ"] = "FAIL"
+                    phaseMap["\(phasePrefix)_CHILD_DENIED_SENTINEL_READ"] = "FAIL"
+                    phaseMap["\(phasePrefix)_CHILD_CONTAINMENT"] = "FAIL"
+                }
             } else {
                 phaseMap["\(phasePrefix)_CHILD_ALLOWED_READ"] = "FAIL"
                 phaseMap["\(phasePrefix)_CHILD_DENIED_SENTINEL_READ"] = "FAIL"
@@ -730,7 +758,8 @@ func runChildMode(args: [String]) {
         childInheritsContainment: inherits
     )
     if let data = try? JSONEncoder().encode(childRes), let jsonStr = String(data: data, encoding: .utf8) {
-        print(jsonStr)
+        print("CHILD_PROBE_JSON=\(jsonStr)")
+        fflush(stdout)
     }
 }
 

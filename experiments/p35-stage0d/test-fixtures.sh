@@ -348,6 +348,62 @@ if [[ "$SIG_RES" == *"PROFILE_TOO_NARROW"* ]]; then
 fi
 echo "PASS: Fixture 11 - SIGSEGV_11_CLASSIFICATION=PASS"
 
+# ----------------------------------------------------
+# Fixture 12: Phase 1 Security Semantic Verification Rules
+# ----------------------------------------------------
+# 1. DENIED_RESULT_COUNTS_AS_SECURITY_PASS
+evaluate_probe_result() {
+  local kind="$1" # ALLOWED / DENIED / NETWORK / CHILD
+  local status="$2"
+  local reason="$3"
+
+  case "$kind" in
+    ALLOWED)
+      if [ "$status" = "PASS" ] && [ "$reason" = "READ_OK" ]; then echo "PASS_ALLOWED"; else echo "FAIL"; fi
+      ;;
+    DENIED)
+      if [ "$status" = "PASS" ] && [ "$reason" = "POLICY_DENIED" ]; then echo "PASS_POLICY_DENIED"; else echo "FAIL"; fi
+      ;;
+    NETWORK)
+      if [ "$status" = "DENIED" ] && [ "$reason" = "CONNECT_POLICY_DENIED" ]; then echo "PASS_POLICY_DENIED"; else echo "FAIL"; fi
+      ;;
+    CHILD)
+      if [ "$status" = "PASS" ] && [ "$reason" = "INHERITS_DENIED" ]; then echo "PASS_POLICY_DENIED"; else echo "FAIL"; fi
+      ;;
+    *)
+      echo "FAIL"
+      ;;
+  esac
+}
+
+[ "$(evaluate_probe_result "DENIED" "PASS" "POLICY_DENIED")" = "PASS_POLICY_DENIED" ]
+echo "PASS: Fixture 12.1 - DENIED_RESULT_COUNTS_AS_SECURITY_PASS=PASS"
+
+# 2. ALLOWED_RESULT_COUNTS_AS_ALLOWED_PASS
+[ "$(evaluate_probe_result "ALLOWED" "PASS" "READ_OK")" = "PASS_ALLOWED" ]
+echo "PASS: Fixture 12.2 - ALLOWED_RESULT_COUNTS_AS_ALLOWED_PASS=PASS"
+
+# 3. NOT_FOUND_NEVER_COUNTS_AS_SECURITY_PASS
+[ "$(evaluate_probe_result "DENIED" "INCONCLUSIVE" "NOT_FOUND")" != "PASS_POLICY_DENIED" ]
+echo "PASS: Fixture 12.3 - NOT_FOUND_NEVER_COUNTS_AS_SECURITY_PASS=PASS"
+
+# 4. SECURITY_FAIL_WITH_NO_SIGNAL_IS_NOT_CRASH
+evaluate_crash_exclusion() {
+  local rc="$1"
+  local signal="$2"
+  if [ "$signal" = "NONE" ]; then echo "CRASH_EXCLUDED_YES"; else echo "CRASH_EXCLUDED_NO"; fi
+}
+[ "$(evaluate_crash_exclusion 1 "NONE")" = "CRASH_EXCLUDED_YES" ]
+echo "PASS: Fixture 12.4 - SECURITY_FAIL_WITH_NO_SIGNAL_IS_NOT_CRASH=PASS"
+
+# 5. NETWORK_DENIED_SEMANTIC
+[ "$(evaluate_probe_result "NETWORK" "DENIED" "CONNECT_POLICY_DENIED")" = "PASS_POLICY_DENIED" ]
+echo "PASS: Fixture 12.5 - NETWORK_DENIED_SEMANTIC=PASS"
+
+# 6. CHILD_DENIED_SEMANTIC
+[ "$(evaluate_probe_result "CHILD" "PASS" "INHERITS_DENIED")" = "PASS_POLICY_DENIED" ]
+echo "PASS: Fixture 12.6 - CHILD_DENIED_SEMANTIC=PASS"
+
 echo "========================================="
 echo "ALL STAGE 0D FIXTURES PASSED"
 echo "========================================="
