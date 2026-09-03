@@ -60,6 +60,12 @@ STAGE0B_INIT_EXECUTABLE=NO
 STAGE0B_INIT_MODE=UNKNOWN
 STAGE0B_INIT_IN_IMAGE=NO
 
+STAGE0B_BINSH_PRESENT=NO
+STAGE0B_BINSH_EXECUTABLE=NO
+STAGE0B_BINSH_TARGET=NONE
+BUSYBOX_PRESENT=NO
+BUSYBOX_EXECUTABLE=NO
+
 INITRAMFS_REPACK=UNKNOWN
 INITRAMFS_REPACK_RC=UNKNOWN
 
@@ -86,6 +92,11 @@ report() {
   echo "STAGE0B_INIT_EXECUTABLE=$STAGE0B_INIT_EXECUTABLE"
   echo "STAGE0B_INIT_MODE=$STAGE0B_INIT_MODE"
   echo "STAGE0B_INIT_IN_IMAGE=$STAGE0B_INIT_IN_IMAGE"
+  echo "STAGE0B_BINSH_PRESENT=$STAGE0B_BINSH_PRESENT"
+  echo "STAGE0B_BINSH_EXECUTABLE=$STAGE0B_BINSH_EXECUTABLE"
+  echo "STAGE0B_BINSH_TARGET=$STAGE0B_BINSH_TARGET"
+  echo "BUSYBOX_PRESENT=$BUSYBOX_PRESENT"
+  echo "BUSYBOX_EXECUTABLE=$BUSYBOX_EXECUTABLE"
   echo "INITRAMFS_REPACK=$INITRAMFS_REPACK"
   echo "INITRAMFS_REPACK_RC=$INITRAMFS_REPACK_RC"
   echo "ORIGINAL_INIT_SHA_UNCHANGED=$ORIGINAL_INIT_SHA_UNCHANGED"
@@ -276,6 +287,49 @@ if [ "$VERIFY_STAGE0B_SHA" != "$STAGE0B_INIT_SRC_SHA" ]; then
   INITRAMFS_VERIFY_ERROR="STAGE0B_INIT_SHA_MISMATCH"
   rm -rf "$VERIFY_DIR"
   blocked "STAGE0B_INIT_SHA_MISMATCH"
+fi
+
+# 5c. M4: Interpreter Verification (/bin/sh and /bin/busybox)
+if [ -e "$VERIFY_DIR/bin/sh" ] || [ -L "$VERIFY_DIR/bin/sh" ]; then
+  STAGE0B_BINSH_PRESENT=YES
+  if [ -L "$VERIFY_DIR/bin/sh" ]; then
+    sh_target="$(readlink "$VERIFY_DIR/bin/sh")"
+    STAGE0B_BINSH_TARGET="$sh_target"
+    if [[ "$sh_target" == /* ]]; then
+      resolved_target="$VERIFY_DIR$sh_target"
+    else
+      resolved_target="$(cd "$(dirname "$VERIFY_DIR/bin/sh")" && pwd)/$sh_target"
+    fi
+    canonical_verify="$(realpath "$VERIFY_DIR")"
+    canonical_target="$(realpath "$resolved_target" 2>/dev/null || echo "")"
+    case "$canonical_target" in
+      "$canonical_verify"/*)
+        if [ -x "$canonical_target" ]; then
+          STAGE0B_BINSH_EXECUTABLE=YES
+        fi
+        ;;
+      *)
+        STAGE0B_BINSH_EXECUTABLE=NO
+        ;;
+    esac
+  elif [ -x "$VERIFY_DIR/bin/sh" ]; then
+    STAGE0B_BINSH_EXECUTABLE=YES
+    STAGE0B_BINSH_TARGET="REGULAR_FILE"
+  fi
+fi
+
+if [ -f "$VERIFY_DIR/bin/busybox" ]; then
+  BUSYBOX_PRESENT=YES
+  if [ -x "$VERIFY_DIR/bin/busybox" ]; then
+    BUSYBOX_EXECUTABLE=YES
+  fi
+fi
+
+if [ "$STAGE0B_BINSH_PRESENT" != "YES" ] || [ "$STAGE0B_BINSH_EXECUTABLE" != "YES" ] || [ "$BUSYBOX_PRESENT" != "YES" ] || [ "$BUSYBOX_EXECUTABLE" != "YES" ]; then
+  INITRAMFS_VERIFY=FAIL
+  INITRAMFS_VERIFY_ERROR="STAGE0B_INTERPRETER_INVALID"
+  rm -rf "$VERIFY_DIR"
+  blocked "STAGE0B_INTERPRETER_INVALID"
 fi
 
 rm -rf "$VERIFY_DIR"

@@ -114,14 +114,16 @@ if let su = shareURL {
 
 let VIRTIOFS_TAG = "lmdr-stage0b"
 let CONSOLE_ATTACHMENT_NAME = "VZFileHandleSerialPortAttachment"
-let CONSOLE_CAPTURE_LIMIT = 256 * 1024
+let CONSOLE_CAPTURE_LIMIT = 4194304 // 4 MiB (CONSOLE_CAPTURE_LIMIT_BYTES)
 
 // ======================================================================
-// Guest console capture: bounded, lock-protected buffer.
+// Guest console capture: bounded (4 MiB), lock-protected buffer with
+// continuous drain support.
 // ======================================================================
 final class ConsoleCapture: @unchecked Sendable {
     private let lock = NSLock()
     private var buffer = Data()
+    private var totalBytesSeen: Int = 0
     private var didTruncate = false
     let limit: Int
 
@@ -130,72 +132,24 @@ final class ConsoleCapture: @unchecked Sendable {
     func append(_ chunk: Data) {
         lock.lock(); defer { lock.unlock() }
         if chunk.isEmpty { return }
-        if buffer.count + chunk.count > limit {
-            let room = max(0, limit - buffer.count)
-            buffer.append(chunk.prefix(room))
-            didTruncate = true
+        totalBytesSeen += chunk.count
+        if buffer.count < limit {
+            let room = limit - buffer.count
+            if chunk.count > room {
+                buffer.append(chunk.prefix(room))
+                didTruncate = true
+            } else {
+                buffer.append(chunk)
+            }
         } else {
-            buffer.append(chunk)
+            didTruncate = true
         }
     }
+
     func snapshot() -> Data { lock.lock(); defer { lock.unlock() }; return buffer }
     var truncated: Bool { lock.lock(); defer { lock.unlock() }; return didTruncate }
-    var count: Int { lock.lock(); defer { lock.unlock() }; return buffer.count }
-    func contains(_ needle: String) -> Bool {
-        lock.lock(); defer { lock.unlock() }
-        return buffer.range(of: Data(needle.utf8)) != nil
-    }
-}
-
-// POSIX pipe: [0] = host reads guest output, [1] = VZ writes guest output.
-var consolePipeFD: [Int32] = [-1, -1]
-guard pipe(&consolePipeFD) == 0 else { fail(sub, "pipe() failed for console capture") }
-let consoleReadFD = consolePipeFD[0]
-let consoleWriteFD = consolePipeFD[1]
-
-let consoleCapture = ConsoleCapture(limit: CONSOLE_CAPTURE_LIMIT)
-
-// Host->guest side is /dev/null so a guest read on the console returns EOF
-// instead of blocking the guest or the host forever.
-let consoleAttachment: VZFileHandleSerialPortAttachment
-var toGuestHandle: FileHandle? = nil
-do {
-    guard let toGuest = FileHandle(forReadingAtPath: "/dev/null") else {
-        fail(sub, "cannot open /dev/null for console host->guest side")
-    }
-    toGuestHandle = toGuest
-    let fromGuest = FileHandle(fileDescriptor: consoleWriteFD, closeOnDealloc: false)
-    consoleAttachment = VZFileHandleSerialPortAttachment(
-        fileHandleForReading: toGuest,
-        fileHandleForWriting: fromGuest
-    )
-}
-
-// Bounded, non-blocking drain of the guest console into consoleCapture.
-func startConsoleReader() -> DispatchSourceRead {
-    _ = fcntl(consoleReadFD, F_SETFL, O_NONBLOCK)
-    let source = DispatchSource.makeReadSource(
-        fileDescriptor: consoleReadFD,
-        queue: DispatchQueue.global(qos: .utility)
-    )
-    source.setEventHandler {
-        var buf = [UInt8](repeating: 0, count: 8192)
-        let chunkSize = buf.count
-        while true {
-            let n = buf.withUnsafeMutableBytes { read(consoleReadFD, $0.baseAddress, chunkSize) }
-            if n > 0 {
-                consoleCapture.append(Data(buf[0..<n]))
-                if consoleCapture.count >= consoleCapture.limit { break }
-            } else if n == 0 {
-                source.cancel()
-                return
-            } else {
-                break  // EAGAIN
-            }
-        }
-    }
-    source.resume()
-    return source
+    var captureBytes: Int { lock.lock(); defer { lock.unlock() }; return buffer.count }
+    var totalBytes: Int { lock.lock(); defer { lock.unlock() }; return totalBytesSeen }
 }
 
 // Allowed known guest keys (fail-closed, only recognized keys processed)
@@ -242,31 +196,70 @@ let hostSecurityKeys: Set<String> = [
     "VM_STOP",
     "VM_FINAL_STATE",
     "VM_QUEUE_POLICY",
+    "VM_STOP_TRIGGER",
+    "VM_STOP_ORIGIN",
     "CLEANUP_PATH_GATE",
     "TEMP_FILES_CLEANED",
     "ORPHAN_PROCESS_COUNT"
 ]
 
-struct GuestReport {
-    var fields: [String: String] = [:]
-    var malformedLinesCount: Int = 0
-    var unknownKeysCount: Int = 0
-    var parseStatus: String = "INCONCLUSIVE" // PASS / FAIL / INCONCLUSIVE
-}
+// ======================================================================
+// Incremental Inline Parser: parses lines on the fly across split chunks.
+// ======================================================================
+final class InlineParser: @unchecked Sendable {
+    private let lock = NSLock()
+    private var pendingLine = ""
+    private var fields: [String: String] = [:]
+    private var malformedLinesCount: Int = 0
+    private var unknownKeysCount: Int = 0
+    private var securityViolation: Bool = false
 
-func parseGuestReport(from text: String, captureBytes: Int) -> GuestReport {
-    var report = GuestReport()
-    if captureBytes == 0 {
-        report.parseStatus = "INCONCLUSIVE"
-        return report
+    private var guestInitConfirmed: Bool = false
+    private var guestInitConfirmedTimestampMs: Int? = nil
+    private var guestDoneConfirmed: Bool = false
+
+    let startTimestamp: Date
+
+    init(startTimestamp: Date) {
+        self.startTimestamp = startTimestamp
     }
 
-    var securityViolation = false
+    func feed(_ chunk: Data) {
+        guard let text = String(data: chunk, encoding: .utf8) ?? String(data: chunk, encoding: .isoLatin1) else {
+            return
+        }
+        lock.lock()
+        defer { lock.unlock() }
 
-    for rawLine in text.split(separator: "\n", omittingEmptySubsequences: false) {
-        var line = String(rawLine)
+        let combined = pendingLine + text
+        var lines = combined.components(separatedBy: "\n")
+        pendingLine = lines.removeLast() // Incomplete remainder or empty if ended with newline
+        let maxLineLength = 16384
+        if pendingLine.count > maxLineLength {
+            pendingLine = ""
+            malformedLinesCount += 1
+        }
+
+        for rawLine in lines {
+            processLineLocked(rawLine)
+        }
+    }
+
+    func flush() {
+        lock.lock()
+        defer { lock.unlock() }
+        if !pendingLine.isEmpty {
+            let line = pendingLine
+            pendingLine = ""
+            processLineLocked(line)
+        }
+    }
+
+    private func processLineLocked(_ rawLine: String) {
+        var line = rawLine
         if line.hasSuffix("\r") { line.removeLast() }
-        if line.isEmpty { continue }
+        line = line.trimmingCharacters(in: .whitespaces)
+        if line.isEmpty { return }
 
         if let eqIdx = line.firstIndex(of: "=") {
             let k = String(line[..<eqIdx]).trimmingCharacters(in: .whitespaces)
@@ -277,35 +270,118 @@ func parseGuestReport(from text: String, captureBytes: Int) -> GuestReport {
             if isIdentifier {
                 if hostSecurityKeys.contains(k) {
                     securityViolation = true
-                    report.malformedLinesCount += 1
+                    malformedLinesCount += 1
                 } else if knownGuestKeys.contains(k) {
                     // KEY deduplication: keep first occurrence
-                    if report.fields[k] == nil {
-                        report.fields[k] = v
+                    if fields[k] == nil {
+                        fields[k] = v
+                        if k == "STAGE0B_GUEST_INIT_STARTED" && v == "YES" {
+                            if !guestInitConfirmed {
+                                guestInitConfirmed = true
+                                let ms = Int(Date().timeIntervalSince(startTimestamp) * 1000)
+                                guestInitConfirmedTimestampMs = max(0, ms)
+                            }
+                        } else if k == "STAGE0B_GUEST_DONE" && v == "YES" {
+                            guestDoneConfirmed = true
+                        }
                     }
                 } else if k.hasPrefix("STAGE0B_") || k.hasPrefix("VIRTIOFS_") || k.hasPrefix("GUEST_") || k.hasPrefix("PROBE_") {
-                    report.unknownKeysCount += 1
+                    unknownKeysCount += 1
                 }
             } else if line.hasPrefix("STAGE0B_") || line.hasPrefix("VIRTIOFS_") || line.hasPrefix("GUEST_") {
-                report.malformedLinesCount += 1
+                malformedLinesCount += 1
             }
         } else if line.hasPrefix("STAGE0B_") || line.hasPrefix("VIRTIOFS_") || line.hasPrefix("GUEST_") {
-            report.malformedLinesCount += 1
+            malformedLinesCount += 1
         }
     }
 
-    let initStarted = report.fields["STAGE0B_GUEST_INIT_STARTED"]
-    if securityViolation {
-        report.parseStatus = "FAIL"
-    } else if initStarted == "YES" {
-        report.parseStatus = "PASS"
-    } else if initStarted == "NO" {
-        report.parseStatus = "PASS"
-    } else {
-        report.parseStatus = "INCONCLUSIVE"
+    var isDone: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return guestDoneConfirmed
     }
 
-    return report
+    var isInitConfirmed: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return guestInitConfirmed
+    }
+
+    func snapshot() -> (
+        fields: [String: String],
+        malformed: Int,
+        unknown: Int,
+        secViolation: Bool,
+        initConfirmed: Bool,
+        initTimestampMs: Int?,
+        doneConfirmed: Bool,
+        parseStatus: String
+    ) {
+        lock.lock(); defer { lock.unlock() }
+        let parseStatus: String
+        let initStarted = fields["STAGE0B_GUEST_INIT_STARTED"]
+        if securityViolation {
+            parseStatus = "FAIL"
+        } else if initStarted == "YES" || initStarted == "NO" {
+            parseStatus = "PASS"
+        } else {
+            parseStatus = "INCONCLUSIVE"
+        }
+        return (fields, malformedLinesCount, unknownKeysCount, securityViolation, guestInitConfirmed, guestInitConfirmedTimestampMs, guestDoneConfirmed, parseStatus)
+    }
+}
+
+// POSIX pipe: [0] = host reads guest output, [1] = VZ writes guest output.
+var consolePipeFD: [Int32] = [-1, -1]
+guard pipe(&consolePipeFD) == 0 else { fail(sub, "pipe() failed for console capture") }
+let consoleReadFD = consolePipeFD[0]
+let consoleWriteFD = consolePipeFD[1]
+
+let consoleCapture = ConsoleCapture(limit: CONSOLE_CAPTURE_LIMIT)
+
+// Host->guest side is /dev/null so a guest read on the console returns EOF
+// instead of blocking the guest or the host forever.
+let consoleAttachment: VZFileHandleSerialPortAttachment
+var toGuestHandle: FileHandle? = nil
+do {
+    guard let toGuest = FileHandle(forReadingAtPath: "/dev/null") else {
+        fail(sub, "cannot open /dev/null for console host->guest side")
+    }
+    toGuestHandle = toGuest
+    let fromGuest = FileHandle(fileDescriptor: consoleWriteFD, closeOnDealloc: false)
+    consoleAttachment = VZFileHandleSerialPortAttachment(
+        fileHandleForReading: toGuest,
+        fileHandleForWriting: fromGuest
+    )
+}
+
+// Bounded capture + continuous non-blocking drain of the guest console into
+// both consoleCapture and the incremental inline parser.
+func startConsoleReader(parser: InlineParser) -> DispatchSourceRead {
+    _ = fcntl(consoleReadFD, F_SETFL, O_NONBLOCK)
+    let source = DispatchSource.makeReadSource(
+        fileDescriptor: consoleReadFD,
+        queue: DispatchQueue.global(qos: .utility)
+    )
+    source.setEventHandler {
+        var buf = [UInt8](repeating: 0, count: 8192)
+        let chunkSize = buf.count
+        while true {
+            let n = buf.withUnsafeMutableBytes { read(consoleReadFD, $0.baseAddress, chunkSize) }
+            if n > 0 {
+                let chunk = Data(buf[0..<n])
+                consoleCapture.append(chunk)
+                // Inline parser continuously feeds, even after capture buffer limit (4 MiB) is reached
+                parser.feed(chunk)
+            } else if n == 0 {
+                source.cancel()
+                return
+            } else {
+                break  // EAGAIN
+            }
+        }
+    }
+    source.resume()
+    return source
 }
 
 // ======================================================================
@@ -442,8 +518,12 @@ else if sub == "run" {
             vm = VZVirtualMachine(configuration: config, queue: vmQueue)
         }
 
-        let consoleSource = startConsoleReader()
         let startT = Date()
+        let inlineParser = InlineParser(startTimestamp: startT)
+        let consoleSource = startConsoleReader(parser: inlineParser)
+
+        var vmStopTrigger = "UNKNOWN"
+        let vmStopOrigin = "HOST_CONTROLLED"
 
         let startGroup = DispatchGroup()
         startGroup.enter()
@@ -478,18 +558,20 @@ else if sub == "run" {
             coldStartMs = Int(runningT.timeIntervalSince(startT) * 1000)
 
             // Wait for the guest to finish its probe, bounded by runSeconds.
-            // This replaces the previous blind fixed sleep: previously the host
-            // could stop the VM before guest init had emitted anything.
             let deadline = Date().addingTimeInterval(Double(runSeconds))
             while Date() < deadline {
-                if consoleCapture.contains("STAGE0B_GUEST_DONE=YES") {
+                if inlineParser.isDone {
                     guestReportedDone = true
+                    vmStopTrigger = "GUEST_DONE_MARKER"
                     break
                 }
-                Thread.sleep(forTimeInterval: 0.25)
+                Thread.sleep(forTimeInterval: 0.1)
+            }
+            if vmStopTrigger == "UNKNOWN" {
+                vmStopTrigger = "HOST_TIMEOUT"
             }
             // Short settle so trailing console bytes land in the buffer.
-            Thread.sleep(forTimeInterval: guestReportedDone ? 1.0 : 0.3)
+            Thread.sleep(forTimeInterval: guestReportedDone ? 0.8 : 0.3)
 
             let stopGroup = DispatchGroup(); stopGroup.enter()
             vmQueue.async {
@@ -508,23 +590,25 @@ else if sub == "run" {
             vmFinalState = finalStr
         } else {
             vmFinalState = "not-started"
+            vmStopTrigger = "HOST_ERROR"
         }
 
         // --- drain the console: drop our write end so the reader sees EOF ---
         close(consoleWriteFD)
         for _ in 0..<20 {
-            let before = consoleCapture.count
+            let before = consoleCapture.totalBytes
             Thread.sleep(forTimeInterval: 0.05)
-            if consoleCapture.count == before { break }
+            if consoleCapture.totalBytes == before { break }
         }
         consoleSource.cancel()
         close(consoleReadFD)
         toGuestHandle?.closeFile()
         Thread.sleep(forTimeInterval: 0.1)
 
+        inlineParser.flush()
+        let snap = inlineParser.snapshot()
+
         let consoleData = consoleCapture.snapshot()
-        let consoleText = String(data: consoleData, encoding: .utf8) ?? ""
-        let report = parseGuestReport(from: consoleText, captureBytes: consoleData.count)
 
         var consoleLogWritten = false
         if let logPath = consoleLogPath {
@@ -546,6 +630,8 @@ else if sub == "run" {
         }
 
         let virtiofsAttached = !config.directorySharingDevices.isEmpty
+        let reportComplete = (snap.initConfirmed && snap.doneConfirmed) ? "YES" : "NO"
+
         emit([
             "stage": "run",
             "ok": vmStart && vmRunning && vmStop,
@@ -565,36 +651,41 @@ else if sub == "run" {
             "vmStartQueue": vmStartQueue,
             "vmStopQueue": vmStopQueue,
             "vmQueuePolicy": policy,
-            // --- guest console evidence (Stage 0B Evidence-Pipeline Repair) ---
+            "vmStopTrigger": vmStopTrigger,
+            "vmStopOrigin": vmStopOrigin,
+            // --- guest console evidence (Stage 0B M1-M3 Inline & Continuous Drain) ---
             "consoleAttachment": CONSOLE_ATTACHMENT_NAME,
-            "consoleCaptureBytes": consoleData.count,
-            "consoleCaptureTruncated": consoleCapture.truncated,
+            "consoleTotalBytesSeen": consoleCapture.totalBytes,
+            "consoleCaptureBytes": consoleCapture.captureBytes,
+            "consoleCaptureTruncated": consoleCapture.truncated ? "YES" : "NO",
             "consoleLogWritten": consoleLogWritten,
             "guestCommandLine": cmdline,
-            "guestReportParse": report.parseStatus,
-            "guestReportMalformedLines": report.malformedLinesCount,
-            "guestReportUnknownKeys": report.unknownKeysCount,
-            "guestInitStarted": report.fields["STAGE0B_GUEST_INIT_STARTED"] ?? "NOT_REPORTED",
-            "guestPid1": report.fields["STAGE0B_GUEST_PID1"] ?? "NOT_REPORTED",
-            "guestBeforeVirtiofs": report.fields["STAGE0B_GUEST_BEFORE_VIRTIOFS"] ?? "NOT_REPORTED",
-            "guestReportComplete": (report.fields["STAGE0B_GUEST_DONE"] == "YES" || guestReportedDone) ? "YES" : "NO",
-            "virtiofsFstypeListed": report.fields["VIRTIOFS_FSTYPE_LISTED"] ?? "NOT_REPORTED",
-            "virtiofsModprobeRc": report.fields["VIRTIOFS_MODPROBE_RC"] ?? "NOT_REPORTED",
-            "virtiofsMountRc": report.fields["VIRTIOFS_MOUNT_RC"] ?? "NOT_REPORTED",
-            "virtiofsMount": report.fields["VIRTIOFS_MOUNT"] ?? "NOT_REPORTED",
-            "virtiofsMountError": report.fields["VIRTIOFS_MOUNT_ERROR"] ?? "NOT_REPORTED",
-            "virtiofsGuestSupport": report.fields["VIRTIOFS_GUEST_SUPPORT"] ?? "NOT_REPORTED",
-            "guestResultsWritable": report.fields["GUEST_RESULTS_WRITABLE"] ?? "NOT_REPORTED",
-            "hostHomeExposedToGuest": report.fields["HOST_HOME_EXPOSED_TO_GUEST"] ?? "NOT_REPORTED",
-            "guestHasVirtioNet": report.fields["GUEST_HAS_VIRTIO_NET"] ?? "NOT_REPORTED",
-            "guestInterfaces": report.fields["GUEST_INTERFACES"] ?? "NOT_REPORTED",
-            "probeSpecLoaded": report.fields["PROBE_SPEC_LOADED"] ?? "NOT_REPORTED",
-            "guestReadHostMarker": report.fields["GUEST_READ_HOST_MARKER"] ?? "NOT_REPORTED",
-            "guestWriteMarker": report.fields["GUEST_WRITE_MARKER"] ?? "NOT_REPORTED",
-            "dotdotEscape": report.fields["DOTDOT_ESCAPE"] ?? "NOT_REPORTED",
-            "symlinkEscapeRel": report.fields["SYMLINK_ESCAPE_REL"] ?? "NOT_REPORTED",
-            "symlinkEscapeAbs": report.fields["SYMLINK_ESCAPE_ABS"] ?? "NOT_REPORTED",
-            "absolutePathEscape": report.fields["ABSOLUTE_PATH_ESCAPE"] ?? "NOT_REPORTED",
+            "guestReportParse": snap.parseStatus,
+            "guestReportMalformedLines": snap.malformed,
+            "guestReportUnknownKeys": snap.unknown,
+            "guestInitConfirmedInline": snap.initConfirmed ? "YES" : "NO",
+            "guestInitConfirmedInlineTimestampMs": snap.initTimestampMs.map(String.init) ?? "NOT_REPORTED",
+            "guestInitStarted": snap.fields["STAGE0B_GUEST_INIT_STARTED"] ?? "NOT_REPORTED",
+            "guestPid1": snap.fields["STAGE0B_GUEST_PID1"] ?? "NOT_REPORTED",
+            "guestBeforeVirtiofs": snap.fields["STAGE0B_GUEST_BEFORE_VIRTIOFS"] ?? "NOT_REPORTED",
+            "guestReportComplete": reportComplete,
+            "virtiofsFstypeListed": snap.fields["VIRTIOFS_FSTYPE_LISTED"] ?? "NOT_REPORTED",
+            "virtiofsModprobeRc": snap.fields["VIRTIOFS_MODPROBE_RC"] ?? "NOT_REPORTED",
+            "virtiofsMountRc": snap.fields["VIRTIOFS_MOUNT_RC"] ?? "NOT_REPORTED",
+            "virtiofsMount": snap.fields["VIRTIOFS_MOUNT"] ?? "NOT_REPORTED",
+            "virtiofsMountError": snap.fields["VIRTIOFS_MOUNT_ERROR"] ?? "NOT_REPORTED",
+            "virtiofsGuestSupport": snap.fields["VIRTIOFS_GUEST_SUPPORT"] ?? "NOT_REPORTED",
+            "guestResultsWritable": snap.fields["GUEST_RESULTS_WRITABLE"] ?? "NOT_REPORTED",
+            "hostHomeExposedToGuest": snap.fields["HOST_HOME_EXPOSED_TO_GUEST"] ?? "NOT_REPORTED",
+            "guestHasVirtioNet": snap.fields["GUEST_HAS_VIRTIO_NET"] ?? "NOT_REPORTED",
+            "guestInterfaces": snap.fields["GUEST_INTERFACES"] ?? "NOT_REPORTED",
+            "probeSpecLoaded": snap.fields["PROBE_SPEC_LOADED"] ?? "NOT_REPORTED",
+            "guestReadHostMarker": snap.fields["GUEST_READ_HOST_MARKER"] ?? "NOT_REPORTED",
+            "guestWriteMarker": snap.fields["GUEST_WRITE_MARKER"] ?? "NOT_REPORTED",
+            "dotdotEscape": snap.fields["DOTDOT_ESCAPE"] ?? "NOT_REPORTED",
+            "symlinkEscapeRel": snap.fields["SYMLINK_ESCAPE_REL"] ?? "NOT_REPORTED",
+            "symlinkEscapeAbs": snap.fields["SYMLINK_ESCAPE_ABS"] ?? "NOT_REPORTED",
+            "absolutePathEscape": snap.fields["ABSOLUTE_PATH_ESCAPE"] ?? "NOT_REPORTED",
             "runSeconds": runSeconds,
             "error": startErrorStr as Any
         ])
