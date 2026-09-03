@@ -43,10 +43,20 @@ else
 fi
 
 # --- minimal early-userspace environment (busybox) ---
-mount -t proc proc /proc 2>/dev/null
-mount -t sysfs sysfs /sys 2>/dev/null
-mount -t devtmpfs devtmpfs /dev 2>/dev/null
-mkdir -p /worktree /tmp
+export PATH=/bin:/sbin:/usr/bin:/usr/sbin
+
+if [ -x /bin/busybox ]; then
+  /bin/busybox --install -s 2>/dev/null || true
+  /bin/busybox mkdir -p /proc /sys /dev /worktree /tmp 2>/dev/null || true
+  /bin/busybox mount -t proc proc /proc 2>/dev/null || true
+  /bin/busybox mount -t sysfs sysfs /sys 2>/dev/null || true
+  /bin/busybox mount -t devtmpfs devtmpfs /dev 2>/dev/null || true
+else
+  mkdir -p /proc /sys /dev /worktree /tmp 2>/dev/null || true
+  mount -t proc proc /proc 2>/dev/null || true
+  mount -t sysfs sysfs /sys 2>/dev/null || true
+  mount -t devtmpfs devtmpfs /dev 2>/dev/null || true
+fi
 
 echo "STAGE0B_GUEST_BEFORE_VIRTIOFS=YES"
 
@@ -244,4 +254,10 @@ emit "STAGE0B_GUEST_DONE=YES"
 sync 2>/dev/null
 
 # idle so the host controls VM stop (host stops early on STAGE0B_GUEST_DONE)
-while true; do sleep 3600; done
+while true; do
+  if [ -x /bin/busybox ]; then
+    /bin/busybox sleep 3600 2>/dev/null || sleep 3600 2>/dev/null || read _ 2>/dev/null || true
+  else
+    sleep 3600 2>/dev/null || read _ 2>/dev/null || true
+  fi
+done
