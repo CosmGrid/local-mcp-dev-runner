@@ -1,0 +1,244 @@
+#!/bin/sh
+#
+# Stage 0D guest init: verifies VirtioFS guest isolation and escape prevention.
+# Runs as PID 1 via rdinit=/stage0d-init.
+
+echo "STAGE0D_GUEST_INIT_STARTED=YES"
+
+if [ "$$" -eq 1 ]; then
+  echo "STAGE0D_GUEST_PID1=YES"
+else
+  echo "STAGE0D_GUEST_PID1=NO"
+fi
+
+# --- minimal early-userspace environment (busybox) ---
+export PATH=/bin:/sbin:/usr/bin:/usr/sbin
+
+if [ -x /bin/busybox ]; then
+  /bin/busybox --install -s 2>/dev/null || true
+  /bin/busybox mkdir -p /proc /sys /dev /worktree /tmp 2>/dev/null || true
+  /bin/busybox mount -t proc proc /proc 2>/dev/null || true
+  /bin/busybox mount -t sysfs sysfs /sys 2>/dev/null || true
+  /bin/busybox mount -t devtmpfs devtmpfs /dev 2>/dev/null || true
+else
+  mkdir -p /proc /sys /dev /worktree /tmp 2>/dev/null || true
+  mount -t proc proc /proc 2>/dev/null || true
+  mount -t sysfs sysfs /sys 2>/dev/null || true
+  mount -t devtmpfs devtmpfs /dev 2>/dev/null || true
+fi
+
+echo "STAGE0D_GUEST_BEFORE_VIRTIOFS=YES"
+
+# ================= virtiofs capability + mount =================
+if grep -q "virtiofs" /proc/filesystems 2>/dev/null; then
+  VIRTIOFS_FSTYPE_LISTED=YES
+else
+  VIRTIOFS_FSTYPE_LISTED=NO
+fi
+
+modprobe virtiofs >/dev/null 2>&1
+VIRTIOFS_MODPROBE_RC=$?
+
+MOUNT_BIN=""
+if [ -x /bin/busybox ]; then
+  MOUNT_BIN="/bin/busybox mount"
+elif command -v mount >/dev/null 2>&1; then
+  MOUNT_BIN="mount"
+fi
+
+if [ -z "$MOUNT_BIN" ]; then
+  VIRTIOFS_MOUNT_RC=127
+  VIRTIOFS_MOUNT=FAIL
+  VIRTIOFS_MOUNT_ERROR=MOUNT_COMMAND_MISSING
+else
+  MOUNT_ERR_FILE=/tmp/lmdr-stage0d-mount-err
+  : > "$MOUNT_ERR_FILE" 2>/dev/null
+  $MOUNT_BIN -t virtiofs lmdr-stage0d /worktree 2> "$MOUNT_ERR_FILE"
+  VIRTIOFS_MOUNT_RC=$?
+
+  if [ "$VIRTIOFS_MOUNT_RC" = "0" ]; then
+    VIRTIOFS_MOUNT=PASS
+    VIRTIOFS_MOUNT_ERROR=NONE
+  else
+    VIRTIOFS_MOUNT=FAIL
+    classify_mount_error() {
+      e="$(printf '%s' "$1" | tr 'A-Z' 'a-z')"
+      case "$e" in
+        *"unknown filesystem"*|*"bad file type"*)          echo "UNKNOWN_FILESYSTEM" ;;
+        *"no such device"*|*"cannot find"*)                 echo "NO_SUCH_DEVICE" ;;
+        *"invalid argument"*)                               echo "INVALID_ARGUMENT" ;;
+        *"permission denied"*|*"operation not permitted"*)  echo "PERMISSION_DENIED" ;;
+        *)                                                  echo "OTHER" ;;
+      esac
+    }
+    VIRTIOFS_MOUNT_ERROR="$(classify_mount_error "$(cat "$MOUNT_ERR_FILE" 2>/dev/null)")"
+  fi
+  rm -f "$MOUNT_ERR_FILE" 2>/dev/null
+fi
+
+if [ "$VIRTIOFS_MOUNT" = "PASS" ]; then
+  VIRTIOFS_GUEST_SUPPORT=PASS
+else
+  case "$VIRTIOFS_MOUNT_ERROR" in
+    UNKNOWN_FILESYSTEM|NO_SUCH_DEVICE) VIRTIOFS_GUEST_SUPPORT=FAIL ;;
+    *)                                 VIRTIOFS_GUEST_SUPPORT=UNPROVEN ;;
+  esac
+fi
+
+echo "VIRTIOFS_FSTYPE_LISTED=$VIRTIOFS_FSTYPE_LISTED"
+echo "VIRTIOFS_MODPROBE_RC=$VIRTIOFS_MODPROBE_RC"
+echo "VIRTIOFS_MOUNT_RC=$VIRTIOFS_MOUNT_RC"
+echo "VIRTIOFS_MOUNT=$VIRTIOFS_MOUNT"
+echo "VIRTIOFS_MOUNT_ERROR=$VIRTIOFS_MOUNT_ERROR"
+echo "VIRTIOFS_GUEST_SUPPORT=$VIRTIOFS_GUEST_SUPPORT"
+
+# ================= secondary channel: share-backed results file ===============
+R=/worktree/guest-results.txt
+R_WRITABLE=NO
+if [ "$VIRTIOFS_MOUNT" = "PASS" ]; then
+  : > "$R" 2>/dev/null && R_WRITABLE=YES
+fi
+echo "GUEST_RESULTS_WRITABLE=$R_WRITABLE"
+
+emit() {
+  echo "$*"
+  if [ "$R_WRITABLE" = "YES" ]; then echo "$*" >> "$R"; fi
+}
+
+# ---- host HOME exposure: does not depend on the share ----
+if [ -e /Users ]; then
+  GUEST_HOST_HOME_EXPOSED=YES
+else
+  GUEST_HOST_HOME_EXPOSED=NO
+fi
+emit "GUEST_HOST_HOME_EXPOSED=$GUEST_HOST_HOME_EXPOSED"
+
+# ---- network device check: does not depend on the share ----
+GUEST_INTERFACES=""
+GUEST_HAS_VIRTIO_NET=NO
+if [ -f /proc/net/dev ]; then
+  iface_list=$(grep -v 'lo:' /proc/net/dev 2>/dev/null | awk -F: 'NR>1 {print $1}' | tr -d ' ' | grep -v '^$' | tr '\n' ',')
+  GUEST_INTERFACES="${iface_list%,}"
+fi
+if [ -n "$GUEST_INTERFACES" ]; then
+  GUEST_HAS_VIRTIO_NET=YES
+else
+  GUEST_INTERFACES="NONE"
+fi
+emit "GUEST_HAS_VIRTIO_NET=$GUEST_HAS_VIRTIO_NET"
+emit "GUEST_INTERFACES=$GUEST_INTERFACES"
+
+# ================= share-dependent gates =================
+if [ "$VIRTIOFS_MOUNT" != "PASS" ]; then
+  emit "GUEST_HOST_TO_GUEST_READ=NOT_RUN"
+  emit "GUEST_GUEST_TO_HOST_WRITE=NOT_RUN"
+  emit "GUEST_DOTDOT_ESCAPE=INCONCLUSIVE"
+  emit "GUEST_SYMLINK_ESCAPE_REL=INCONCLUSIVE"
+  emit "GUEST_SYMLINK_ESCAPE_ABS=INCONCLUSIVE"
+  emit "GUEST_ABSOLUTE_PATH_ESCAPE=INCONCLUSIVE"
+  emit "PROBE_SPEC_LOADED=NO"
+  emit "STAGE0D_GUEST_DONE=YES"
+  sync 2>/dev/null
+  while true; do
+    if [ -x /bin/busybox ]; then
+      /bin/busybox sleep 3600 2>/dev/null || read _ 2>/dev/null || true
+    else
+      sleep 3600 2>/dev/null || read _ 2>/dev/null || true
+    fi
+  done
+fi
+
+# --- load the probe spec the host placed in the allowed share ---
+SECRET=""
+DOTDOT=""
+SYMLINK_REL=""
+SYMLINK_ABS=""
+ABS_PATH=""
+PROBE_SPEC_LOADED=NO
+if [ -f /worktree/probe-spec.sh ]; then
+  . /worktree/probe-spec.sh
+  PROBE_SPEC_LOADED=YES
+fi
+
+if [ -z "$SECRET" ] || [ "$SECRET" = "LMDR_STAGE0D_DENIED_UNSET" ]; then
+  PROBE_SPEC_LOADED=NO
+fi
+emit "PROBE_SPEC_LOADED=$PROBE_SPEC_LOADED"
+
+if [ "$PROBE_SPEC_LOADED" != "YES" ]; then
+  emit "GUEST_HOST_TO_GUEST_READ=NOT_RUN"
+  emit "GUEST_GUEST_TO_HOST_WRITE=NOT_RUN"
+  emit "GUEST_DOTDOT_ESCAPE=INCONCLUSIVE"
+  emit "GUEST_SYMLINK_ESCAPE_REL=INCONCLUSIVE"
+  emit "GUEST_SYMLINK_ESCAPE_ABS=INCONCLUSIVE"
+  emit "GUEST_ABSOLUTE_PATH_ESCAPE=INCONCLUSIVE"
+  emit "STAGE0D_GUEST_DONE=YES"
+  sync 2>/dev/null
+  while true; do
+    if [ -x /bin/busybox ]; then
+      /bin/busybox sleep 3600 2>/dev/null || read _ 2>/dev/null || true
+    else
+      sleep 3600 2>/dev/null || read _ 2>/dev/null || true
+    fi
+  done
+fi
+
+# --- IO gate ---
+GUEST_READ_VAL=$(cat /worktree/host-read.txt 2>/dev/null)
+if [ -n "$GUEST_READ_VAL" ] && [ "$GUEST_READ_VAL" != "NOT_FOUND" ]; then
+  GUEST_HOST_TO_GUEST_READ="PASS"
+else
+  GUEST_HOST_TO_GUEST_READ="FAIL"
+fi
+emit "GUEST_HOST_TO_GUEST_READ=$GUEST_HOST_TO_GUEST_READ"
+
+GUEST_WRITE_MARKER="LMDR_STAGE0D_GUESTWRITE_$(head -c 8 /dev/urandom 2>/dev/null | od -An -tx1 | tr -d ' \n')"
+echo "$GUEST_WRITE_MARKER" > /worktree/guest-write.txt 2>/dev/null
+if [ -f /worktree/guest-write.txt ] && grep -q "$GUEST_WRITE_MARKER" /worktree/guest-write.txt 2>/dev/null; then
+  GUEST_GUEST_TO_HOST_WRITE="PASS"
+else
+  GUEST_GUEST_TO_HOST_WRITE="FAIL"
+fi
+emit "GUEST_GUEST_TO_HOST_WRITE=$GUEST_GUEST_TO_HOST_WRITE"
+
+# --- path-escape helper ---
+read_secret() {
+  got=$(cat "/worktree/$1" 2>/dev/null)
+  if [ -n "$got" ] && [ "$got" = "$SECRET" ]; then
+    echo "FAIL"
+  else
+    echo "PASS"
+  fi
+}
+
+# DOTDOT: worktree/../sentinels/<secretfile>
+GUEST_DOTDOT_ESCAPE=$(read_secret "$DOTDOT")
+emit "GUEST_DOTDOT_ESCAPE=$GUEST_DOTDOT_ESCAPE"
+
+# SYMLINK (relative): worktree/escape-link/<secretfile>
+GUEST_SYMLINK_ESCAPE_REL=$(read_secret "$SYMLINK_REL")
+emit "GUEST_SYMLINK_ESCAPE_REL=$GUEST_SYMLINK_ESCAPE_REL"
+
+# SYMLINK (absolute): worktree/escape-link-abs/<secretfile>
+GUEST_SYMLINK_ESCAPE_ABS=$(read_secret "$SYMLINK_ABS")
+emit "GUEST_SYMLINK_ESCAPE_ABS=$GUEST_SYMLINK_ESCAPE_ABS"
+
+# ABSOLUTE PATH: verbatim host path
+got_abs=$(cat "$ABS_PATH" 2>/dev/null)
+if [ -n "$got_abs" ] && [ "$got_abs" = "$SECRET" ]; then
+  GUEST_ABSOLUTE_PATH_ESCAPE="FAIL"
+else
+  GUEST_ABSOLUTE_PATH_ESCAPE="PASS"
+fi
+emit "GUEST_ABSOLUTE_PATH_ESCAPE=$GUEST_ABSOLUTE_PATH_ESCAPE"
+
+emit "STAGE0D_GUEST_DONE=YES"
+sync 2>/dev/null
+
+while true; do
+  if [ -x /bin/busybox ]; then
+    /bin/busybox sleep 3600 2>/dev/null || sleep 3600 2>/dev/null || read _ 2>/dev/null || true
+  else
+    sleep 3600 2>/dev/null || read _ 2>/dev/null || true
+  fi
+done
