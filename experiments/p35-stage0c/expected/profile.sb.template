@@ -1,0 +1,12 @@
+;; Stage 0C Host Helper Seatbelt Profile Template
+(version 1)
+(deny default)
+
+(import "system.sb")
+
+;; Explicit process permissions
+(allow process-fork)
+(allow process-exec (literal "%%HELPER_BIN%%"))
+
+;; Allow read/write exclusively inside canonical allowed directory
+(allow file-read* file-write* (subpath "%%ALLOWED_DIR%%"))
