@@ -65,6 +65,9 @@ STAGE0B_BINSH_EXECUTABLE=NO
 STAGE0B_BINSH_TARGET=NONE
 BUSYBOX_PRESENT=NO
 BUSYBOX_EXECUTABLE=NO
+BUSYBOX_MOUNT_APPLET_PRESENT=NO
+STAGE0B_MOUNT_COMMAND="/bin/busybox mount"
+STAGE0B_MOUNT_SYMLINK_VALID=NO
 
 INITRAMFS_REPACK=UNKNOWN
 INITRAMFS_REPACK_RC=UNKNOWN
@@ -97,6 +100,9 @@ report() {
   echo "STAGE0B_BINSH_TARGET=$STAGE0B_BINSH_TARGET"
   echo "BUSYBOX_PRESENT=$BUSYBOX_PRESENT"
   echo "BUSYBOX_EXECUTABLE=$BUSYBOX_EXECUTABLE"
+  echo "BUSYBOX_MOUNT_APPLET_PRESENT=$BUSYBOX_MOUNT_APPLET_PRESENT"
+  echo "STAGE0B_MOUNT_COMMAND=$STAGE0B_MOUNT_COMMAND"
+  echo "STAGE0B_MOUNT_SYMLINK_VALID=$STAGE0B_MOUNT_SYMLINK_VALID"
   echo "INITRAMFS_REPACK=$INITRAMFS_REPACK"
   echo "INITRAMFS_REPACK_RC=$INITRAMFS_REPACK_RC"
   echo "ORIGINAL_INIT_SHA_UNCHANGED=$ORIGINAL_INIT_SHA_UNCHANGED"
@@ -203,6 +209,11 @@ if [ -x "$EXTRACT/stage0b-init" ]; then
 else
   STAGE0B_INIT_EXECUTABLE=NO
   blocked "STAGE0B_INIT_NOT_EXECUTABLE"
+fi
+
+# Create /bin/mount symlink in temporary initramfs if absent
+if [ -f "$EXTRACT/bin/busybox" ] && [ ! -e "$EXTRACT/bin/mount" ] && [ ! -L "$EXTRACT/bin/mount" ]; then
+  (cd "$EXTRACT/bin" && ln -s busybox mount)
 fi
 
 # --- step 4: rebuild archive with clean relative paths (no leading ./) ---
@@ -323,13 +334,33 @@ if [ -f "$VERIFY_DIR/bin/busybox" ]; then
   if [ -x "$VERIFY_DIR/bin/busybox" ]; then
     BUSYBOX_EXECUTABLE=YES
   fi
+  if (set +o pipefail; strings "$VERIFY_DIR/bin/busybox" 2>/dev/null | grep -w "mount" >/dev/null); then
+    BUSYBOX_MOUNT_APPLET_PRESENT=YES
+  else
+    BUSYBOX_MOUNT_APPLET_PRESENT=NO
+  fi
 fi
+
+if [ -L "$VERIFY_DIR/bin/mount" ] || [ -f "$VERIFY_DIR/bin/mount" ]; then
+  if [ -x "$VERIFY_DIR/bin/mount" ]; then
+    STAGE0B_MOUNT_SYMLINK_VALID=YES
+  fi
+fi
+
+STAGE0B_MOUNT_COMMAND="/bin/busybox mount"
 
 if [ "$STAGE0B_BINSH_PRESENT" != "YES" ] || [ "$STAGE0B_BINSH_EXECUTABLE" != "YES" ] || [ "$BUSYBOX_PRESENT" != "YES" ] || [ "$BUSYBOX_EXECUTABLE" != "YES" ]; then
   INITRAMFS_VERIFY=FAIL
   INITRAMFS_VERIFY_ERROR="STAGE0B_INTERPRETER_INVALID"
   rm -rf "$VERIFY_DIR"
   blocked "STAGE0B_INTERPRETER_INVALID"
+fi
+
+if [ "$BUSYBOX_MOUNT_APPLET_PRESENT" != "YES" ]; then
+  INITRAMFS_VERIFY=FAIL
+  INITRAMFS_VERIFY_ERROR="BUSYBOX_MOUNT_APPLET_MISSING"
+  rm -rf "$VERIFY_DIR"
+  blocked "BUSYBOX_MOUNT_APPLET_MISSING"
 fi
 
 rm -rf "$VERIFY_DIR"

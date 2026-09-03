@@ -61,14 +61,21 @@ fi
 modprobe virtiofs >/dev/null 2>&1
 VIRTIOFS_MODPROBE_RC=$?
 
-if ! command -v mount >/dev/null 2>&1; then
+MOUNT_BIN=""
+if [ -x /bin/busybox ]; then
+  MOUNT_BIN="/bin/busybox mount"
+elif command -v mount >/dev/null 2>&1; then
+  MOUNT_BIN="mount"
+fi
+
+if [ -z "$MOUNT_BIN" ]; then
   VIRTIOFS_MOUNT_RC=127
   VIRTIOFS_MOUNT=FAIL
   VIRTIOFS_MOUNT_ERROR=MOUNT_COMMAND_MISSING
 else
   MOUNT_ERR_FILE=/tmp/lmdr-stage0b-mount-err
   : > "$MOUNT_ERR_FILE" 2>/dev/null
-  mount -t virtiofs lmdr-stage0b /worktree 2> "$MOUNT_ERR_FILE"
+  $MOUNT_BIN -t virtiofs lmdr-stage0b /worktree 2> "$MOUNT_ERR_FILE"
   VIRTIOFS_MOUNT_RC=$?
 
   if [ "$VIRTIOFS_MOUNT_RC" = "0" ]; then
@@ -79,10 +86,11 @@ else
     classify_mount_error() {
       e="$(printf '%s' "$1" | tr 'A-Z' 'a-z')"
       case "$e" in
-        *"unknown filesystem"*|*"bad file type"*|*"invalid argument"*) echo "UNKNOWN_FILESYSTEM" ;;
-        *"no such device"*|*"cannot find"*)                            echo "NO_SUCH_DEVICE" ;;
-        *"permission denied"*|*"operation not permitted"*)             echo "PERMISSION_DENIED" ;;
-        *)                                                             echo "OTHER" ;;
+        *"unknown filesystem"*|*"bad file type"*)          echo "UNKNOWN_FILESYSTEM" ;;
+        *"no such device"*|*"cannot find"*)                 echo "NO_SUCH_DEVICE" ;;
+        *"invalid argument"*)                               echo "INVALID_ARGUMENT" ;;
+        *"permission denied"*|*"operation not permitted"*)  echo "PERMISSION_DENIED" ;;
+        *)                                                  echo "OTHER" ;;
       esac
     }
     VIRTIOFS_MOUNT_ERROR="$(classify_mount_error "$(cat "$MOUNT_ERR_FILE" 2>/dev/null)")"
