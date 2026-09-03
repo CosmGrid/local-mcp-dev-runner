@@ -42,91 +42,246 @@ case "$OUT" in
 esac
 
 BUILD_GATE=PASS
-INIT_PRESERVED=UNKNOWN
+BLOCK_REASON=NONE
+
+CPIO_IMPL="UNKNOWN"
+GZIP_IMPL="UNKNOWN"
+
+INITRAMFS_EXTRACT=UNKNOWN
+INITRAMFS_EXTRACT_RC=UNKNOWN
+
+ORIGINAL_INIT_PRESENT=UNKNOWN
+ORIGINAL_INIT_SHA="UNKNOWN"
+
+STAGE0B_INIT_COPY=UNKNOWN
+STAGE0B_INIT_CHMOD=UNKNOWN
 STAGE0B_INIT_PRESENT=NO
 STAGE0B_INIT_EXECUTABLE=NO
 STAGE0B_INIT_MODE=UNKNOWN
 STAGE0B_INIT_IN_IMAGE=NO
 
+INITRAMFS_REPACK=UNKNOWN
+INITRAMFS_REPACK_RC=UNKNOWN
+
+ORIGINAL_INIT_SHA_UNCHANGED=UNKNOWN
+INITRAMFS_ORIGINAL_INIT_PRESERVED=UNKNOWN
+INITRAMFS_VERIFY=UNKNOWN
+INITRAMFS_VERIFY_ERROR="NONE"
+
+GUEST_INIT_ADDED=UNKNOWN
+
 report() {
   echo "INITRAMFS_BUILD_GATE=$BUILD_GATE"
-  echo "INITRAMFS_ORIGINAL_INIT_PRESERVED=$INIT_PRESERVED"
-  echo "INITRAMFS_STAGE0B_INIT=$STAGE0B_INIT_IN_IMAGE"
-  echo "INITRAMFS_STAGE0B_INIT_EXECUTABLE=$STAGE0B_INIT_EXECUTABLE"
-  echo "INITRAMFS_OUT=$OUT"
-  echo "GUEST_INIT_ADDED=$GUEST_INIT_ADDED"
+  echo "BLOCK_REASON=$BLOCK_REASON"
+  echo "INITRAMFS_BUILD_GATE_REASON=$BLOCK_REASON"
+  echo "CPIO_IMPLEMENTATION=$CPIO_IMPL"
+  echo "GZIP_IMPLEMENTATION=$GZIP_IMPL"
+  echo "INITRAMFS_EXTRACT=$INITRAMFS_EXTRACT"
+  echo "INITRAMFS_EXTRACT_RC=$INITRAMFS_EXTRACT_RC"
+  echo "ORIGINAL_INIT_PRESENT=$ORIGINAL_INIT_PRESENT"
+  echo "ORIGINAL_INIT_SHA=$ORIGINAL_INIT_SHA"
+  echo "STAGE0B_INIT_COPY=$STAGE0B_INIT_COPY"
+  echo "STAGE0B_INIT_CHMOD=$STAGE0B_INIT_CHMOD"
   echo "STAGE0B_INIT_PRESENT=$STAGE0B_INIT_PRESENT"
   echo "STAGE0B_INIT_EXECUTABLE=$STAGE0B_INIT_EXECUTABLE"
   echo "STAGE0B_INIT_MODE=$STAGE0B_INIT_MODE"
   echo "STAGE0B_INIT_IN_IMAGE=$STAGE0B_INIT_IN_IMAGE"
+  echo "INITRAMFS_REPACK=$INITRAMFS_REPACK"
+  echo "INITRAMFS_REPACK_RC=$INITRAMFS_REPACK_RC"
+  echo "ORIGINAL_INIT_SHA_UNCHANGED=$ORIGINAL_INIT_SHA_UNCHANGED"
+  echo "INITRAMFS_ORIGINAL_INIT_PRESERVED=$INITRAMFS_ORIGINAL_INIT_PRESERVED"
+  echo "INITRAMFS_STAGE0B_INIT=$STAGE0B_INIT_IN_IMAGE"
+  echo "INITRAMFS_STAGE0B_INIT_EXECUTABLE=$STAGE0B_INIT_EXECUTABLE"
+  echo "INITRAMFS_VERIFY=$INITRAMFS_VERIFY"
+  echo "INITRAMFS_VERIFY_ERROR=$INITRAMFS_VERIFY_ERROR"
+  echo "INITRAMFS_OUT=$OUT"
+  echo "GUEST_INIT_ADDED=$GUEST_INIT_ADDED"
 }
 
 blocked() {
   # $1 = reason
-  echo "INITRAMFS_BUILD_GATE_REASON=$1"
+  BLOCK_REASON="$1"
   BUILD_GATE=BLOCKED
   report
   exit 2
 }
 
-# --- preflight: required tools ---
-command -v cpio >/dev/null 2>&1 || blocked cpio_missing
-command -v gzip >/dev/null 2>&1 || blocked gzip_missing
+# --- preflight: tool detection & implementations ---
+if ! command -v cpio >/dev/null 2>&1; then blocked "cpio_missing"; fi
+if ! command -v gzip >/dev/null 2>&1; then blocked "gzip_missing"; fi
+if ! command -v find >/dev/null 2>&1; then blocked "find_missing"; fi
+if ! command -v shasum >/dev/null 2>&1; then blocked "shasum_missing"; fi
+
+CPIO_IMPL="$(cpio --version 2>&1 | head -1 | tr '\n' ' ' | cut -c1-60 || echo "bsdcpio")"
+GZIP_IMPL="$(gzip --version 2>&1 | head -1 | tr '\n' ' ' | cut -c1-60 || echo "apple_gzip")"
 
 # --- source initramfs must exist ---
-[ -f "$SRC_INITRAMFS" ] || blocked "src_initramfs_missing"
+if [ ! -f "$SRC_INITRAMFS" ]; then
+  blocked "src_initramfs_missing"
+fi
 
 # --- guest init script must exist ---
-[ -f "$GUEST_INIT" ] || blocked "guest_init_missing"
+if [ ! -f "$GUEST_INIT" ]; then
+  blocked "guest_init_missing"
+fi
 
-GUEST_INIT_ADDED=UNKNOWN
 EXTRACT="$HERE/.build/initramfs-stage0b-extract"
 rm -rf "$EXTRACT"
 mkdir -p "$EXTRACT"
 
-# --- unpack (gzip+cpio) ---
-if ! gzip -dc "$SRC_INITRAMFS" 2>/dev/null | (cd "$EXTRACT" && cpio -idm 2>/dev/null); then
-  blocked unpack_failed
-fi
+# --- step 1: unpack (gzip + cpio) ---
+EXTRACT_ERR_FILE="/tmp/lmdr-p35-extract-err.$$"
+: > "$EXTRACT_ERR_FILE"
 
-# --- original /init preserved? ---
-if [ -f "$EXTRACT/init" ]; then
-  INIT_PRESERVED=YES
+set +e
+(
+  gzip -dc "$SRC_INITRAMFS" 2> "$EXTRACT_ERR_FILE.gzip" \
+    | (cd "$EXTRACT" && cpio -idm 2> "$EXTRACT_ERR_FILE.cpio")
+)
+INITRAMFS_EXTRACT_RC=$?
+set -e
+
+if [ "$INITRAMFS_EXTRACT_RC" -ne 0 ]; then
+  INITRAMFS_EXTRACT=FAIL
+  raw_err="$(cat "$EXTRACT_ERR_FILE.gzip" "$EXTRACT_ERR_FILE.cpio" 2>/dev/null | tr '\n' ' ' | cut -c1-120)"
+  rm -f "$EXTRACT_ERR_FILE"* 2>/dev/null
+  blocked "INITRAMFS_EXTRACT_FAILED: ${raw_err:-unknown}"
 else
-  INIT_PRESERVED=NO
-  BUILD_GATE=BLOCKED
+  INITRAMFS_EXTRACT=PASS
+fi
+rm -f "$EXTRACT_ERR_FILE"* 2>/dev/null
+
+# --- step 2: original /init inspection and sha256 baseline ---
+if [ -f "$EXTRACT/init" ]; then
+  ORIGINAL_INIT_PRESENT=YES
+  ORIGINAL_INIT_SHA="$(shasum -a 256 "$EXTRACT/init" 2>/dev/null | awk '{print $1}')"
+else
+  ORIGINAL_INIT_PRESENT=NO
+  ORIGINAL_INIT_SHA="MISSING"
+  blocked "ORIGINAL_INIT_MISSING"
 fi
 
-# --- add stage0b-init (does NOT touch /init) ---
-cp "$GUEST_INIT" "$EXTRACT/stage0b-init"
-chmod 0755 "$EXTRACT/stage0b-init"
-GUEST_INIT_ADDED="$EXTRACT/stage0b-init"
+# --- step 3: copy stage0b-init (does NOT touch /init) ---
+STAGE0B_INIT_SRC_SHA="$(shasum -a 256 "$GUEST_INIT" 2>/dev/null | awk '{print $1}')"
+
+if cp -f "$GUEST_INIT" "$EXTRACT/stage0b-init" 2>/dev/null; then
+  STAGE0B_INIT_COPY=PASS
+  GUEST_INIT_ADDED="$EXTRACT/stage0b-init"
+else
+  STAGE0B_INIT_COPY=FAIL
+  blocked "STAGE0B_INIT_COPY_FAILED"
+fi
+
+if chmod 0755 "$EXTRACT/stage0b-init" 2>/dev/null; then
+  STAGE0B_INIT_CHMOD=PASS
+else
+  STAGE0B_INIT_CHMOD=FAIL
+  blocked "STAGE0B_INIT_CHMOD_FAILED"
+fi
 
 if [ -f "$EXTRACT/stage0b-init" ]; then
   STAGE0B_INIT_PRESENT=YES
   STAGE0B_INIT_MODE="$(stat -f "%Mp%Lp" "$EXTRACT/stage0b-init" 2>/dev/null || echo UNKNOWN)"
-  if [ -x "$EXTRACT/stage0b-init" ]; then STAGE0B_INIT_EXECUTABLE=YES; fi
+else
+  STAGE0B_INIT_PRESENT=NO
+  blocked "STAGE0B_INIT_NOT_PRESENT"
 fi
 
-# --- rebuild (cpio newc + gzip) ---
+if [ -x "$EXTRACT/stage0b-init" ]; then
+  STAGE0B_INIT_EXECUTABLE=YES
+else
+  STAGE0B_INIT_EXECUTABLE=NO
+  blocked "STAGE0B_INIT_NOT_EXECUTABLE"
+fi
+
+# --- step 4: rebuild archive with clean relative paths (no leading ./) ---
 mkdir -p "$(dirname "$OUT")"
-if ! (cd "$EXTRACT" && find . | cpio -o -H newc 2>/dev/null | gzip -9 > "$OUT"); then
-  blocked repack_failed
+
+REPACK_ERR_FILE="/tmp/lmdr-p35-repack-err.$$"
+: > "$REPACK_ERR_FILE"
+
+set +e
+(
+  cd "$EXTRACT" && \
+  find . -mindepth 1 | sed 's|^\./||' | cpio -o -H newc 2> "$REPACK_ERR_FILE.cpio" | gzip -9 > "$OUT" 2> "$REPACK_ERR_FILE.gzip"
+)
+INITRAMFS_REPACK_RC=$?
+set -e
+
+if [ "$INITRAMFS_REPACK_RC" -ne 0 ] || [ ! -s "$OUT" ]; then
+  INITRAMFS_REPACK=FAIL
+  raw_err="$(cat "$REPACK_ERR_FILE.cpio" "$REPACK_ERR_FILE.gzip" 2>/dev/null | tr '\n' ' ' | cut -c1-120)"
+  rm -f "$REPACK_ERR_FILE"* 2>/dev/null
+  blocked "INITRAMFS_REPACK_FAILED: ${raw_err:-unknown}"
+else
+  INITRAMFS_REPACK=PASS
+fi
+rm -f "$REPACK_ERR_FILE"* 2>/dev/null
+
+# --- step 5: verify the repacked archive byte-for-byte in an independent unpack ---
+VERIFY_DIR="$(mktemp -d /tmp/lmdr-p35-verify-XXXXXX)"
+set +e
+gzip -dc "$OUT" 2>/dev/null | (cd "$VERIFY_DIR" && cpio -idm 2>/dev/null)
+VERIFY_UNPACK_RC=$?
+set -e
+
+if [ "$VERIFY_UNPACK_RC" -ne 0 ]; then
+  INITRAMFS_VERIFY=FAIL
+  INITRAMFS_VERIFY_ERROR="VERIFY_UNPACK_FAILED"
+  rm -rf "$VERIFY_DIR"
+  blocked "VERIFY_UNPACK_FAILED"
 fi
 
-# --- verify the entry really landed in the REPACKED image (not just the extract
-#     dir). This is check #1 of the Stage 0B evidence-pipeline audit: if this is
-#     NO, rdinit=/stage0b-init can never work and the guest silently never runs.
-#     NOTE: BSD grep BRE has no `\|` alternation — use multiple -e flags.
-if gzip -dc "$OUT" 2>/dev/null | cpio -it 2>/dev/null \
-     | grep -qx -e "./stage0b-init" -e "stage0b-init"; then
-  STAGE0B_INIT_IN_IMAGE=YES
+# 5a. Verify original /init preserved byte-for-byte
+if [ ! -f "$VERIFY_DIR/init" ]; then
+  INITRAMFS_VERIFY=FAIL
+  INITRAMFS_VERIFY_ERROR="ORIGINAL_INIT_MISSING_IN_OUTPUT"
+  rm -rf "$VERIFY_DIR"
+  blocked "ORIGINAL_INIT_MISSING_IN_OUTPUT"
 fi
-if [ "$STAGE0B_INIT_IN_IMAGE" != "YES" ]; then BUILD_GATE=BLOCKED; fi
-if [ "$STAGE0B_INIT_PRESENT" != "YES" ] || [ "$STAGE0B_INIT_EXECUTABLE" != "YES" ]; then
-  BUILD_GATE=BLOCKED
+
+VERIFY_INIT_SHA="$(shasum -a 256 "$VERIFY_DIR/init" 2>/dev/null | awk '{print $1}')"
+if [ "$VERIFY_INIT_SHA" = "$ORIGINAL_INIT_SHA" ]; then
+  ORIGINAL_INIT_SHA_UNCHANGED=YES
+  INITRAMFS_ORIGINAL_INIT_PRESERVED=YES
+else
+  ORIGINAL_INIT_SHA_UNCHANGED=NO
+  INITRAMFS_ORIGINAL_INIT_PRESERVED=NO
+  INITRAMFS_VERIFY=FAIL
+  INITRAMFS_VERIFY_ERROR="ORIGINAL_INIT_SHA_CHANGED"
+  rm -rf "$VERIFY_DIR"
+  blocked "ORIGINAL_INIT_CHANGED"
 fi
-if [ "$INIT_PRESERVED" != "YES" ]; then BUILD_GATE=BLOCKED; fi
+
+# 5b. Verify /stage0b-init exists, is executable, and content matches source
+if [ ! -f "$VERIFY_DIR/stage0b-init" ]; then
+  INITRAMFS_VERIFY=FAIL
+  INITRAMFS_VERIFY_ERROR="STAGE0B_INIT_MISSING_IN_OUTPUT"
+  rm -rf "$VERIFY_DIR"
+  blocked "STAGE0B_INIT_NOT_IN_ARCHIVE"
+fi
+
+STAGE0B_INIT_IN_IMAGE=YES
+
+if [ ! -x "$VERIFY_DIR/stage0b-init" ]; then
+  INITRAMFS_VERIFY=FAIL
+  INITRAMFS_VERIFY_ERROR="STAGE0B_INIT_NOT_EXECUTABLE_IN_OUTPUT"
+  rm -rf "$VERIFY_DIR"
+  blocked "STAGE0B_INIT_NOT_EXECUTABLE"
+fi
+
+VERIFY_STAGE0B_SHA="$(shasum -a 256 "$VERIFY_DIR/stage0b-init" 2>/dev/null | awk '{print $1}')"
+if [ "$VERIFY_STAGE0B_SHA" != "$STAGE0B_INIT_SRC_SHA" ]; then
+  INITRAMFS_VERIFY=FAIL
+  INITRAMFS_VERIFY_ERROR="STAGE0B_INIT_SHA_MISMATCH"
+  rm -rf "$VERIFY_DIR"
+  blocked "STAGE0B_INIT_SHA_MISMATCH"
+fi
+
+rm -rf "$VERIFY_DIR"
+INITRAMFS_VERIFY=PASS
+BUILD_GATE=PASS
+BLOCK_REASON=NONE
 
 report
 exit 0
