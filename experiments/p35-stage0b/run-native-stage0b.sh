@@ -50,6 +50,9 @@ INITRAMFS_VERIFY=UNKNOWN
 INITRAMFS_VERIFY_ERROR=NONE
 INITRAMFS_BUILD_GATE=UNKNOWN
 
+PRESERVE_CONSOLE_LOG="${PRESERVE_CONSOLE_LOG:-0}"
+PRESERVED_CONSOLE_LOG=NONE
+
 CONSOLE_ATTACHMENT=UNKNOWN
 CONSOLE_CAPTURE_BYTES=0
 
@@ -151,6 +154,7 @@ emit_report() {
   [ -z "$INITRAMFS_VERIFY" ] && INITRAMFS_VERIFY=UNKNOWN
   [ -z "$INITRAMFS_VERIFY_ERROR" ] && INITRAMFS_VERIFY_ERROR=NONE
   [ -z "$INITRAMFS_BUILD_GATE" ] && INITRAMFS_BUILD_GATE=UNKNOWN
+  [ -z "$PRESERVED_CONSOLE_LOG" ] && PRESERVED_CONSOLE_LOG=NONE
   [ -z "$DOTDOT_ESCAPE" ] && DOTDOT_ESCAPE=UNKNOWN
   [ -z "$SYMLINK_ESCAPE_REL" ] && SYMLINK_ESCAPE_REL=UNKNOWN
   [ -z "$SYMLINK_ESCAPE_ABS" ] && SYMLINK_ESCAPE_ABS=UNKNOWN
@@ -195,6 +199,7 @@ emit_report() {
   echo "INITRAMFS_BUILD_GATE=$INITRAMFS_BUILD_GATE"
   echo "CONSOLE_ATTACHMENT=$CONSOLE_ATTACHMENT"
   echo "CONSOLE_CAPTURE_BYTES=$CONSOLE_CAPTURE_BYTES"
+  echo "PRESERVED_CONSOLE_LOG=$PRESERVED_CONSOLE_LOG"
   echo "GUEST_INIT_STARTED=$GUEST_INIT_STARTED"
   echo "GUEST_PID1=$GUEST_PID1"
   echo "GUEST_REPORT_COMPLETE=$GUEST_REPORT_COMPLETE"
@@ -281,6 +286,18 @@ cleanup() {
     fi
   else
     ORPHAN_PROCESS_COUNT=0
+  fi
+
+  # Optional console log preservation (for debugging rdinit/console failures)
+  if [ "$PRESERVE_CONSOLE_LOG" = "1" ] && [ -n "${CANONICAL_RUN_ROOT:-}" ]; then
+    local src_log="$CANONICAL_RUN_ROOT/guest-console.log"
+    local dest_log="${CONSOLE_LOG_DEST:-/tmp/lmdr-p35-stage0b-guest-console.log}"
+    if [ -f "$src_log" ]; then
+      cp -f "$src_log" "$dest_log" 2>/dev/null || true
+      if [ -f "$dest_log" ]; then
+        PRESERVED_CONSOLE_LOG="$dest_log"
+      fi
+    fi
   fi
 
   # Canonical /private/tmp Cleanup Gate (8 mandatory criteria)
