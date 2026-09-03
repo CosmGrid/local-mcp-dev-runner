@@ -221,6 +221,114 @@ if ! echo "$REGRESSION_CHECK" | grep -q "TEST_MODE_SIGABRT_REGRESSION=PASS"; the
 fi
 echo "PASS: Fixture 8 - TEST_MODE_SIGABRT_REGRESSION=PASS"
 
+# ----------------------------------------------------
+# Fixture 9: PHASE1_MATRIX_STATE_MACHINE
+# ----------------------------------------------------
+test_phase1_state_machine() {
+  local u_rc="$1"
+  local s_rc="$2"
+  local u_pass="FAIL"
+  local s_pass="FAIL"
+  local reason="NONE"
+
+  if [ "$u_rc" -eq 0 ]; then u_pass="PASS"; fi
+  if [ "$s_rc" -eq 0 ]; then s_pass="PASS"; fi
+
+  if [ "$u_pass" != "PASS" ]; then
+    reason="HELPER_PHASE1_FAILED_UNSANDBOXED"
+  elif [ "$s_pass" != "PASS" ]; then
+    reason="HELPER_PHASE1_FAILED_SANDBOXED"
+  else
+    reason="NONE"
+  fi
+  echo "U=$u_pass S=$s_pass REASON=$reason"
+}
+
+P1_SM1="$(test_phase1_state_machine 1 0)"
+P1_SM2="$(test_phase1_state_machine 0 139)"
+P1_SM3="$(test_phase1_state_machine 0 0)"
+if [[ "$P1_SM1" != *"REASON=HELPER_PHASE1_FAILED_UNSANDBOXED"* ]] || \
+   [[ "$P1_SM2" != *"REASON=HELPER_PHASE1_FAILED_SANDBOXED"* ]] || \
+   [[ "$P1_SM3" != *"REASON=NONE"* ]]; then
+  echo "FAIL: Fixture 9 - phase1 state machine failed"
+  exit 1
+fi
+echo "PASS: Fixture 9 - PHASE1_MATRIX_STATE_MACHINE=PASS"
+
+# ----------------------------------------------------
+# Fixture 10: VZ_CONFIG_SMOKE_STATE_MACHINE
+# ----------------------------------------------------
+test_vz_state_machine() {
+  local u_rc="$1"
+  local s_rc="$2"
+  local u_pass="FAIL"
+  local s_pass="FAIL"
+  local reason="NONE"
+
+  if [ "$u_rc" -eq 0 ]; then u_pass="PASS"; fi
+  if [ "$s_rc" -eq 0 ]; then s_pass="PASS"; fi
+
+  if [ "$u_pass" != "PASS" ]; then
+    reason="HELPER_VZ_CONFIG_FAILED_UNSANDBOXED"
+  elif [ "$s_pass" != "PASS" ]; then
+    reason="HELPER_VZ_CONFIG_FAILED_SANDBOXED"
+  else
+    reason="NONE"
+  fi
+  echo "U=$u_pass S=$s_pass REASON=$reason"
+}
+
+VZ_SM1="$(test_vz_state_machine 1 0)"
+VZ_SM2="$(test_vz_state_machine 0 139)"
+VZ_SM3="$(test_vz_state_machine 0 0)"
+if [[ "$VZ_SM1" != *"REASON=HELPER_VZ_CONFIG_FAILED_UNSANDBOXED"* ]] || \
+   [[ "$VZ_SM2" != *"REASON=HELPER_VZ_CONFIG_FAILED_SANDBOXED"* ]] || \
+   [[ "$VZ_SM3" != *"REASON=NONE"* ]]; then
+  echo "FAIL: Fixture 10 - vz config smoke state machine failed"
+  exit 1
+fi
+echo "PASS: Fixture 10 - VZ_CONFIG_SMOKE_STATE_MACHINE=PASS"
+
+# ----------------------------------------------------
+# Fixture 11: SIGSEGV_11_CLASSIFICATION
+# ----------------------------------------------------
+compute_signal() {
+  local rc="$1"
+  if [ "$rc" -gt 128 ] && [ "$rc" -le 192 ]; then
+    echo "$((rc - 128))"
+  else
+    echo "NONE"
+  fi
+}
+
+classify_test_crash() {
+  local output="$1"
+  local rc="$2"
+  local signal="$(compute_signal "$rc")"
+  local denial="NO"
+  local reason="NONE"
+
+  if grep -iE "deny|operation not permitted|sandbox" <<< "$output" >/dev/null 2>&1; then
+    denial="YES"
+    reason="PROFILE_TOO_NARROW"
+  else
+    denial="NO"
+    reason="HELPER_TEST_MODE_FAILED"
+  fi
+  echo "SIGNAL=$signal DENIAL=$denial REASON=$reason"
+}
+
+SIG_RES="$(classify_test_crash "Segmentation fault: 11" 139)"
+if [[ "$SIG_RES" != *"SIGNAL=11 DENIAL=NO REASON=HELPER_TEST_MODE_FAILED"* ]]; then
+  echo "FAIL: Fixture 11 - SIGSEGV classification failed: $SIG_RES"
+  exit 1
+fi
+if [[ "$SIG_RES" == *"PROFILE_TOO_NARROW"* ]]; then
+  echo "FAIL: Fixture 11 - SIGSEGV misclassified as PROFILE_TOO_NARROW"
+  exit 1
+fi
+echo "PASS: Fixture 11 - SIGSEGV_11_CLASSIFICATION=PASS"
+
 echo "========================================="
 echo "ALL STAGE 0D FIXTURES PASSED"
 echo "========================================="

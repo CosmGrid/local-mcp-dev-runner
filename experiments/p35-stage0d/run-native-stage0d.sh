@@ -2,18 +2,19 @@
 #
 # P3.5 Stage 0D — Host Helper Filesystem Containment + VirtioFS Isolation Prototype Runner
 #
-# Verifies:
-# 1. Helper executed strictly from allowed/helper/
-# 2. VirtioFS shares strictly allowed/share/ (never allowed/)
-# 3. Helper output strictly STDOUT_ONLY captured to .stage0d-runner.json
-# 4. Startup matrix:
-#    - UNSANDBOXED_STARTUP_SMOKE (stage0d-vz-tool --mode startup-smoke)
-#    - SANDBOXED_STARTUP_SMOKE (sandbox-exec EXACT profile --mode startup-smoke)
-#    - Formal --mode test only if sandboxed smoke PASS
-# 5. Accurate exit code and signal reporting (SIGABRT -> signal 6)
-# 6. Distinct separation of crash vs Seatbelt denial evidence
-# 7. Diagnostic log preservation (PRESERVE_STAGE0D_DIAGNOSTICS=1)
-# 8. Canonical /private/tmp 8-criteria cleanup gate
+# Diagnostic Matrix:
+# 1. Startup smoke:
+#    - UNSANDBOXED_STARTUP_SMOKE
+#    - SANDBOXED_STARTUP_SMOKE
+# 2. Phase 1 Host containment smoke:
+#    - UNSANDBOXED_PHASE1_SMOKE
+#    - SANDBOXED_PHASE1_SMOKE
+# 3. VZ configuration smoke:
+#    - UNSANDBOXED_VZ_CONFIG_SMOKE
+#    - SANDBOXED_VZ_CONFIG_SMOKE
+# 4. Formal VM test (only if Phase 1 and VZ Config smpke PASS)
+# 5. Signal and crash separation (SIGSEGV=11, SIGABRT=6)
+# 6. Canonical /private/tmp 8-criteria cleanup gate
 #
 # Does NOT touch production runtime, projects.json, or any managed worktree.
 set -euo pipefail
@@ -44,6 +45,22 @@ UNSANDBOXED_STARTUP_RC="NOT_RUN"
 SANDBOXED_STARTUP_SMOKE="NOT_RUN"
 SANDBOXED_STARTUP_RC="NOT_RUN"
 SANDBOXED_STARTUP_SIGNAL="NONE"
+
+UNSANDBOXED_PHASE1_SMOKE="NOT_RUN"
+UNSANDBOXED_PHASE1_RC="NOT_RUN"
+UNSANDBOXED_PHASE1_SIGNAL="NONE"
+SANDBOXED_PHASE1_SMOKE="NOT_RUN"
+SANDBOXED_PHASE1_RC="NOT_RUN"
+SANDBOXED_PHASE1_SIGNAL="NONE"
+PHASE1_CRASH_EXCLUDED="UNKNOWN"
+
+UNSANDBOXED_VZ_CONFIG_SMOKE="NOT_RUN"
+UNSANDBOXED_VZ_CONFIG_RC="NOT_RUN"
+UNSANDBOXED_VZ_CONFIG_SIGNAL="NONE"
+SANDBOXED_VZ_CONFIG_SMOKE="NOT_RUN"
+SANDBOXED_VZ_CONFIG_RC="NOT_RUN"
+SANDBOXED_VZ_CONFIG_SIGNAL="NONE"
+LAST_VZ_CONFIG_MARKER="NONE"
 
 SANDBOXED_TEST_RC="NOT_RUN"
 SANDBOXED_TEST_SIGNAL="NONE"
@@ -148,6 +165,20 @@ emit_report() {
   echo "SANDBOXED_STARTUP_SMOKE=$SANDBOXED_STARTUP_SMOKE"
   echo "SANDBOXED_STARTUP_RC=$SANDBOXED_STARTUP_RC"
   echo "SANDBOXED_STARTUP_SIGNAL=$SANDBOXED_STARTUP_SIGNAL"
+  echo "UNSANDBOXED_PHASE1_SMOKE=$UNSANDBOXED_PHASE1_SMOKE"
+  echo "UNSANDBOXED_PHASE1_RC=$UNSANDBOXED_PHASE1_RC"
+  echo "UNSANDBOXED_PHASE1_SIGNAL=$UNSANDBOXED_PHASE1_SIGNAL"
+  echo "SANDBOXED_PHASE1_SMOKE=$SANDBOXED_PHASE1_SMOKE"
+  echo "SANDBOXED_PHASE1_RC=$SANDBOXED_PHASE1_RC"
+  echo "SANDBOXED_PHASE1_SIGNAL=$SANDBOXED_PHASE1_SIGNAL"
+  echo "PHASE1_CRASH_EXCLUDED=$PHASE1_CRASH_EXCLUDED"
+  echo "UNSANDBOXED_VZ_CONFIG_SMOKE=$UNSANDBOXED_VZ_CONFIG_SMOKE"
+  echo "UNSANDBOXED_VZ_CONFIG_RC=$UNSANDBOXED_VZ_CONFIG_RC"
+  echo "UNSANDBOXED_VZ_CONFIG_SIGNAL=$UNSANDBOXED_VZ_CONFIG_SIGNAL"
+  echo "SANDBOXED_VZ_CONFIG_SMOKE=$SANDBOXED_VZ_CONFIG_SMOKE"
+  echo "SANDBOXED_VZ_CONFIG_RC=$SANDBOXED_VZ_CONFIG_RC"
+  echo "SANDBOXED_VZ_CONFIG_SIGNAL=$SANDBOXED_VZ_CONFIG_SIGNAL"
+  echo "LAST_VZ_CONFIG_MARKER=$LAST_VZ_CONFIG_MARKER"
   echo "SANDBOXED_TEST_RC=$SANDBOXED_TEST_RC"
   echo "SANDBOXED_TEST_SIGNAL=$SANDBOXED_TEST_SIGNAL"
   echo "HOST_CONTAINMENT_PRE_VM=$HOST_CONTAINMENT_PRE_VM"
@@ -218,6 +249,14 @@ cleanup() {
       cat "$CANONICAL_RUN_DIR/unsandboxed-smoke.log" 2>/dev/null || echo "(no log)"
       echo "=== SANDBOXED STARTUP SMOKE ==="
       cat "$CANONICAL_RUN_DIR/sandboxed-smoke.log" 2>/dev/null || echo "(no log)"
+      echo "=== UNSANDBOXED PHASE1 SMOKE ==="
+      cat "$CANONICAL_RUN_DIR/unsandboxed-phase1.log" 2>/dev/null || echo "(no log)"
+      echo "=== SANDBOXED PHASE1 SMOKE ==="
+      cat "$CANONICAL_RUN_DIR/sandboxed-phase1.log" 2>/dev/null || echo "(no log)"
+      echo "=== UNSANDBOXED VZ CONFIG SMOKE ==="
+      cat "$CANONICAL_RUN_DIR/unsandboxed-vz-config.log" 2>/dev/null || echo "(no log)"
+      echo "=== SANDBOXED VZ CONFIG SMOKE ==="
+      cat "$CANONICAL_RUN_DIR/sandboxed-vz-config.log" 2>/dev/null || echo "(no log)"
       echo "=== SANDBOXED TEST RUNNER OUTPUT ==="
       cat "$CANONICAL_RUN_DIR/.stage0d-runner.json" 2>/dev/null || echo "(no log)"
     } >> "$dbg_log" 2>/dev/null || true
@@ -286,6 +325,14 @@ cleanup() {
             BLOCK_REASON="HELPER_STARTUP_FAILED_UNSANDBOXED" ;;
           SANDBOXED_SMOKE)
             BLOCK_REASON="HELPER_STARTUP_FAILED_SANDBOXED" ;;
+          UNSANDBOXED_PHASE1)
+            BLOCK_REASON="HELPER_PHASE1_FAILED_UNSANDBOXED" ;;
+          SANDBOXED_PHASE1)
+            BLOCK_REASON="HELPER_PHASE1_FAILED_SANDBOXED" ;;
+          UNSANDBOXED_VZ_CONFIG)
+            BLOCK_REASON="HELPER_VZ_CONFIG_FAILED_UNSANDBOXED" ;;
+          SANDBOXED_VZ_CONFIG)
+            BLOCK_REASON="HELPER_VZ_CONFIG_FAILED_SANDBOXED" ;;
           SANDBOX_EXEC)
             BLOCK_REASON="HELPER_TEST_MODE_FAILED" ;;
           REPORT_PARSE)
@@ -559,7 +606,6 @@ if [ "$SANDBOXED_STARTUP_RC" -eq 0 ] && grep -q "STAGE0D_HELPER_MAIN_ENTERED=YES
   SANDBOXED_STARTUP_SMOKE="PASS"
 else
   SANDBOXED_STARTUP_SMOKE="FAIL"
-  # Check if there is explicit Seatbelt denial evidence in output
   if grep -iE "deny|operation not permitted|sandbox" "$SANDBOXED_SMOKE_LOG" >/dev/null 2>&1; then
     SANDBOX_DENIAL_EVIDENCE="YES"
     DENIAL_OPERATION="sandbox-exec:startup-smoke"
@@ -573,7 +619,99 @@ else
   exit 2
 fi
 
-# =================== 7. Formal Test Mode Under sandbox-exec ===================
+# =================== 7. Phase 1 Host Containment Smoke Matrix ===================
+CURRENT_STAGE="UNSANDBOXED_PHASE1"
+UNSANDBOXED_PHASE1_LOG="$CANONICAL_RUN_DIR/unsandboxed-phase1.log"
+set +e
+"$STAGED_HELPER" --mode phase1-smoke --manifest "$PROBES_FILE" > "$UNSANDBOXED_PHASE1_LOG" 2>&1
+UNSANDBOXED_PHASE1_RC=$?
+set -e
+UNSANDBOXED_PHASE1_SIGNAL="$(compute_signal "$UNSANDBOXED_PHASE1_RC")"
+
+if [ "$UNSANDBOXED_PHASE1_RC" -eq 0 ] && grep -q '"HOST_CONTAINMENT_PRE_VM"' "$UNSANDBOXED_PHASE1_LOG"; then
+  UNSANDBOXED_PHASE1_SMOKE="PASS"
+else
+  UNSANDBOXED_PHASE1_SMOKE="FAIL"
+  BLOCK_REASON="HELPER_PHASE1_FAILED_UNSANDBOXED"
+  STAGE0D_RESULT="BLOCKED"
+  exit 2
+fi
+
+CURRENT_STAGE="SANDBOXED_PHASE1"
+SANDBOXED_PHASE1_LOG="$CANONICAL_RUN_DIR/sandboxed-phase1.log"
+set +e
+sandbox-exec -f "$PROFILE_PATH" \
+  "$STAGED_HELPER" --mode phase1-smoke --manifest "$PROBES_FILE" > "$SANDBOXED_PHASE1_LOG" 2>&1
+SANDBOXED_PHASE1_RC=$?
+set -e
+SANDBOXED_PHASE1_SIGNAL="$(compute_signal "$SANDBOXED_PHASE1_RC")"
+
+if [ "$SANDBOXED_PHASE1_RC" -eq 0 ] && grep -q '"HOST_CONTAINMENT_PRE_VM"' "$SANDBOXED_PHASE1_LOG"; then
+  SANDBOXED_PHASE1_SMOKE="PASS"
+  PHASE1_CRASH_EXCLUDED="YES"
+else
+  SANDBOXED_PHASE1_SMOKE="FAIL"
+  PHASE1_CRASH_EXCLUDED="NO"
+  if grep -iE "deny|operation not permitted|sandbox" "$SANDBOXED_PHASE1_LOG" >/dev/null 2>&1; then
+    SANDBOX_DENIAL_EVIDENCE="YES"
+    DENIAL_OPERATION="sandbox-exec:phase1-smoke"
+    DENIAL_PATH_OR_SERVICE="filesystem-or-network"
+    BLOCK_REASON="PROFILE_TOO_NARROW"
+  else
+    SANDBOX_DENIAL_EVIDENCE="NO"
+    BLOCK_REASON="HELPER_PHASE1_FAILED_SANDBOXED"
+  fi
+  STAGE0D_RESULT="BLOCKED"
+  exit 2
+fi
+
+# =================== 8. VZ Config Smoke Matrix ===================
+CURRENT_STAGE="UNSANDBOXED_VZ_CONFIG"
+UNSANDBOXED_VZ_LOG="$CANONICAL_RUN_DIR/unsandboxed-vz-config.log"
+set +e
+"$STAGED_HELPER" --mode vz-config-smoke --manifest "$PROBES_FILE" > "$UNSANDBOXED_VZ_LOG" 2>&1
+UNSANDBOXED_VZ_CONFIG_RC=$?
+set -e
+UNSANDBOXED_VZ_CONFIG_SIGNAL="$(compute_signal "$UNSANDBOXED_VZ_CONFIG_RC")"
+
+if [ "$UNSANDBOXED_VZ_CONFIG_RC" -eq 0 ] && grep -q "STAGE0D_VZ_CONFIG_SMOKE_RESULT=PASS" "$UNSANDBOXED_VZ_LOG"; then
+  UNSANDBOXED_VZ_CONFIG_SMOKE="PASS"
+else
+  UNSANDBOXED_VZ_CONFIG_SMOKE="FAIL"
+  BLOCK_REASON="HELPER_VZ_CONFIG_FAILED_UNSANDBOXED"
+  STAGE0D_RESULT="BLOCKED"
+  exit 2
+fi
+
+CURRENT_STAGE="SANDBOXED_VZ_CONFIG"
+SANDBOXED_VZ_LOG="$CANONICAL_RUN_DIR/sandboxed-vz-config.log"
+set +e
+sandbox-exec -f "$PROFILE_PATH" \
+  "$STAGED_HELPER" --mode vz-config-smoke --manifest "$PROBES_FILE" > "$SANDBOXED_VZ_LOG" 2>&1
+SANDBOXED_VZ_CONFIG_RC=$?
+set -e
+SANDBOXED_VZ_CONFIG_SIGNAL="$(compute_signal "$SANDBOXED_VZ_CONFIG_RC")"
+
+LAST_VZ_CONFIG_MARKER="$(grep -oE "VZ_[A-Z_]+" "$SANDBOXED_VZ_LOG" 2>/dev/null | tail -n 1 || echo "NONE")"
+
+if [ "$SANDBOXED_VZ_CONFIG_RC" -eq 0 ] && grep -q "STAGE0D_VZ_CONFIG_SMOKE_RESULT=PASS" "$SANDBOXED_VZ_LOG"; then
+  SANDBOXED_VZ_CONFIG_SMOKE="PASS"
+else
+  SANDBOXED_VZ_CONFIG_SMOKE="FAIL"
+  if grep -iE "deny|operation not permitted|sandbox" "$SANDBOXED_VZ_LOG" >/dev/null 2>&1; then
+    SANDBOX_DENIAL_EVIDENCE="YES"
+    DENIAL_OPERATION="sandbox-exec:vz-config-smoke"
+    DENIAL_PATH_OR_SERVICE="virtualization-config"
+    BLOCK_REASON="PROFILE_TOO_NARROW"
+  else
+    SANDBOX_DENIAL_EVIDENCE="NO"
+    BLOCK_REASON="HELPER_VZ_CONFIG_FAILED_SANDBOXED"
+  fi
+  STAGE0D_RESULT="BLOCKED"
+  exit 2
+fi
+
+# =================== 9. Formal Test Mode Under sandbox-exec ===================
 CURRENT_STAGE="SANDBOX_EXEC"
 RUNNER_OUTPUT_FILE="$CANONICAL_RUN_DIR/.stage0d-runner.json"
 
@@ -589,7 +727,6 @@ CURRENT_STAGE="REPORT_PARSE"
 OUTPUT_JSON="$(cat "$RUNNER_OUTPUT_FILE" 2>/dev/null || echo "")"
 
 if [ -z "$OUTPUT_JSON" ] || ! echo "$OUTPUT_JSON" | grep -q "HOST_CONTAINMENT_PRE_VM"; then
-  # Inspect if test mode crashed with denial evidence
   if grep -iE "deny|operation not permitted|sandbox" "$RUNNER_OUTPUT_FILE" >/dev/null 2>&1; then
     SANDBOX_DENIAL_EVIDENCE="YES"
     DENIAL_OPERATION="sandbox-exec:test-mode"

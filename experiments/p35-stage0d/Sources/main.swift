@@ -378,6 +378,99 @@ final class InlineParser: @unchecked Sendable {
     }
 }
 
+final class VMContext {
+    var consoleReadFD: Int32 = -1
+    var consoleWriteFD: Int32 = -1
+    var fromGuestReadHandle: FileHandle? = nil
+    var fromGuestWriteHandle: FileHandle? = nil
+    var serialAttachment: VZFileHandleSerialPortAttachment? = nil
+    var vmConfig: VZVirtualMachineConfiguration? = nil
+    var vm: VZVirtualMachine? = nil
+    let vmQueue = DispatchQueue(label: "stage0d.vm.queue")
+
+    deinit {
+        if consoleReadFD >= 0 { close(consoleReadFD) }
+        if consoleWriteFD >= 0 { close(consoleWriteFD) }
+    }
+}
+
+func buildVMConfiguration(manifest: ProbeManifest, ctx: VMContext) throws -> VZVirtualMachineConfiguration {
+    fputs("VZ_BOOTLOADER_BEGIN\n", stdout); fflush(stdout)
+    let bootLoader = VZLinuxBootLoader(kernelURL: URL(fileURLWithPath: manifest.kernelPath))
+    bootLoader.commandLine = "console=hvc0 rdinit=/stage0d-init"
+    bootLoader.initialRamdiskURL = URL(fileURLWithPath: manifest.initrdPath)
+    fputs("VZ_BOOTLOADER_END\n", stdout); fflush(stdout)
+
+    fputs("VZ_SERIAL_PIPE_BEGIN\n", stdout); fflush(stdout)
+    var pipeFDs: [Int32] = [-1, -1]
+    guard pipe(&pipeFDs) == 0 else {
+        throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno), userInfo: nil)
+    }
+    ctx.consoleReadFD = pipeFDs[0]
+    ctx.consoleWriteFD = pipeFDs[1]
+    let fromGuest = FileHandle(fileDescriptor: ctx.consoleWriteFD, closeOnDealloc: false)
+    ctx.fromGuestWriteHandle = fromGuest
+    fputs("VZ_SERIAL_PIPE_END\n", stdout); fflush(stdout)
+
+    fputs("VZ_SERIAL_ATTACHMENT_BEGIN\n", stdout); fflush(stdout)
+    let serialAttachment = VZFileHandleSerialPortAttachment(
+        fileHandleForReading: nil,
+        fileHandleForWriting: fromGuest
+    )
+    ctx.serialAttachment = serialAttachment
+    fputs("VZ_SERIAL_ATTACHMENT_END\n", stdout); fflush(stdout)
+
+    fputs("VZ_SERIAL_DEVICE_BEGIN\n", stdout); fflush(stdout)
+    let serialPort = VZVirtioConsoleDeviceSerialPortConfiguration()
+    serialPort.attachment = serialAttachment
+    fputs("VZ_SERIAL_DEVICE_END\n", stdout); fflush(stdout)
+
+    fputs("VZ_VIRTIOFS_SHARE_BEGIN\n", stdout); fflush(stdout)
+    let shareDir = VZSharedDirectory(url: URL(fileURLWithPath: manifest.sharePath), readOnly: false)
+    let singleShare = VZSingleDirectoryShare(directory: shareDir)
+    fputs("VZ_VIRTIOFS_SHARE_END\n", stdout); fflush(stdout)
+
+    fputs("VZ_VIRTIOFS_DEVICE_BEGIN\n", stdout); fflush(stdout)
+    let fsDev = VZVirtioFileSystemDeviceConfiguration(tag: manifest.virtiofsTag)
+    fsDev.share = singleShare
+    fputs("VZ_VIRTIOFS_DEVICE_END\n", stdout); fflush(stdout)
+
+    fputs("VZ_CONFIG_OBJECT_BEGIN\n", stdout); fflush(stdout)
+    let vmConfig = VZVirtualMachineConfiguration()
+    vmConfig.bootLoader = bootLoader
+    vmConfig.cpuCount = 2
+    vmConfig.memorySize = 512 * 1024 * 1024 // 512 MiB
+    vmConfig.serialPorts = [serialPort]
+    vmConfig.directorySharingDevices = [fsDev]
+    vmConfig.networkDevices = []
+    ctx.vmConfig = vmConfig
+    fputs("VZ_CONFIG_OBJECT_END\n", stdout); fflush(stdout)
+
+    fputs("VZ_CONFIG_VALIDATE_BEGIN\n", stdout); fflush(stdout)
+    try vmConfig.validate()
+    fputs("VZ_CONFIG_VALIDATE_END\n", stdout); fflush(stdout)
+
+    return vmConfig
+}
+
+func runVZConfigSmokeMode(manifestPath: String) {
+    guard let manifestData = try? Data(contentsOf: URL(fileURLWithPath: manifestPath)),
+          let manifest = try? JSONDecoder().decode(ProbeManifest.self, from: manifestData) else {
+        fputs("ERROR: failed to read manifest from \(manifestPath)\n", stderr)
+        exit(2)
+    }
+    fputs("STAGE0D_VZ_CONFIG_SMOKE_ENTERED=YES\n", stdout); fflush(stdout)
+    let ctx = VMContext()
+    do {
+        _ = try buildVMConfiguration(manifest: manifest, ctx: ctx)
+        print("STAGE0D_VZ_CONFIG_SMOKE_RESULT=PASS")
+        exit(0)
+    } catch {
+        print("STAGE0D_VZ_CONFIG_SMOKE_RESULT=FAIL: \(error)")
+        exit(1)
+    }
+}
+
 func runTestMode(manifestPath: String) {
     guard let manifestData = try? Data(contentsOf: URL(fileURLWithPath: manifestPath)),
           let manifest = try? JSONDecoder().decode(ProbeManifest.self, from: manifestData) else {
@@ -415,44 +508,18 @@ func runTestMode(manifestPath: String) {
         report["VM_START"] = vmStart
         report["BLOCK_REASON"] = blockReason
     } else {
+        let vmCtx = VMContext()
         do {
             fputs("STAGE0D_VZ_CONFIG_ENTERED=YES\n", stdout); fflush(stdout)
-            let bootLoader = VZLinuxBootLoader(kernelURL: URL(fileURLWithPath: manifest.kernelPath))
-            bootLoader.commandLine = "console=hvc0 rdinit=/stage0d-init"
-            bootLoader.initialRamdiskURL = URL(fileURLWithPath: manifest.initrdPath)
-
-            let vmConfig = VZVirtualMachineConfiguration()
-            vmConfig.bootLoader = bootLoader
-            vmConfig.cpuCount = 2
-            vmConfig.memorySize = 512 * 1024 * 1024 // 512 MiB
-
-            // Serial console
-            let consolePipe = Pipe()
-            let serialPort = VZVirtioConsoleDeviceSerialPortConfiguration()
-            serialPort.attachment = VZFileHandleSerialPortAttachment(
-                fileHandleForReading: nil,
-                fileHandleForWriting: consolePipe.fileHandleForWriting
-            )
-            vmConfig.serialPorts = [serialPort]
-
-            // VirtioFS share (allowed/share strictly)
-            let shareDir = VZSharedDirectory(url: URL(fileURLWithPath: manifest.sharePath), readOnly: false)
-            let singleShare = VZSingleDirectoryShare(directory: shareDir)
-            let fsDev = VZVirtioFileSystemDeviceConfiguration(tag: manifest.virtiofsTag)
-            fsDev.share = singleShare
-            vmConfig.directorySharingDevices = [fsDev]
-
-            // Strict: NO network device
-            vmConfig.networkDevices = []
-            report["VM_NETWORK_DEVICE_COUNT"] = 0
-
-            try vmConfig.validate()
+            let vmConfig = try buildVMConfiguration(manifest: manifest, ctx: vmCtx)
             vmConfigValidate = "PASS"
 
-            let vm = VZVirtualMachine(configuration: vmConfig)
+            let vm = VZVirtualMachine(configuration: vmConfig, queue: vmCtx.vmQueue)
+            vmCtx.vm = vm
 
             // Start draining serial pipe asynchronously
-            let readHandle = consolePipe.fileHandleForReading
+            let readHandle = FileHandle(fileDescriptor: vmCtx.consoleReadFD, closeOnDealloc: false)
+            vmCtx.fromGuestReadHandle = readHandle
             let group = DispatchGroup()
             group.enter()
 
@@ -467,19 +534,21 @@ func runTestMode(manifestPath: String) {
                 }
             }
 
-            // Start VM
+            // Start VM on vmCtx.vmQueue
             let startSem = DispatchSemaphore(value: 0)
             var startError: Error? = nil
 
             fputs("STAGE0D_VM_START_ATTEMPTED=YES\n", stdout); fflush(stdout)
-            vm.start { result in
-                switch result {
-                case .success:
-                    break
-                case .failure(let error):
-                    startError = error
+            vmCtx.vmQueue.async {
+                vm.start { result in
+                    switch result {
+                    case .success:
+                        break
+                    case .failure(let error):
+                        startError = error
+                    }
+                    startSem.signal()
                 }
-                startSem.signal()
             }
 
             _ = startSem.wait(timeout: .now() + 10.0)
@@ -526,7 +595,7 @@ func runTestMode(manifestPath: String) {
             }
 
             readHandle.readabilityHandler = nil
-            try? consolePipe.fileHandleForWriting.close()
+            try? vmCtx.fromGuestWriteHandle?.close()
             inlineParser.flush()
 
         } catch {
@@ -754,6 +823,12 @@ func main() {
             exit(2)
         }
         runPhase1SmokeMode(manifestPath: manifestPath)
+    } else if mode == "vz-config-smoke" {
+        if manifestPath.isEmpty {
+            fputs("Usage: stage0d-vz-tool --mode vz-config-smoke --manifest <probes.json>\n", stderr)
+            exit(2)
+        }
+        runVZConfigSmokeMode(manifestPath: manifestPath)
     } else if mode == "child" {
         runChildMode(args: Array(args.dropFirst()))
     } else if mode == "validate" {
