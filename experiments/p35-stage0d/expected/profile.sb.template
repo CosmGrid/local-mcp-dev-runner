@@ -14,3 +14,10 @@
 ;; VirtioFS / Fuse sandbox extension capability (Approved R5 Delta)
 (allow generic-issue-extension
   (extension-class "com.apple.virtualization.extension.fuse"))
+
+;; VirtioFS / Path sandbox extension capability (Approved R7 Delta)
+(allow file-issue-extension
+  (require-all
+    (extension-class
+      "com.apple.app-sandbox.read-write")
+    (subpath "%%SHARE_DIR%%")))

@@ -2,8 +2,10 @@
 #
 # Stage 0D guest init: verifies VirtioFS guest isolation and escape prevention.
 # Runs as PID 1 via rdinit=/stage0d-init.
+set +e
 
 echo "STAGE0D_GUEST_INIT_STARTED=YES"
+echo "GUEST_INIT_STARTED=YES"
 
 if [ "$$" -eq 1 ]; then
   echo "STAGE0D_GUEST_PID1=YES"
@@ -27,6 +29,7 @@ else
   mount -t devtmpfs devtmpfs /dev 2>/dev/null || true
 fi
 
+echo "GUEST_EARLY_USERSPACE_READY=YES"
 echo "STAGE0D_GUEST_BEFORE_VIRTIOFS=YES"
 
 # ================= virtiofs capability + mount =================
@@ -51,6 +54,7 @@ if [ -z "$MOUNT_BIN" ]; then
   VIRTIOFS_MOUNT=FAIL
   VIRTIOFS_MOUNT_ERROR=MOUNT_COMMAND_MISSING
 else
+  echo "GUEST_VIRTIOFS_MOUNT_ATTEMPTED=YES"
   MOUNT_ERR_FILE=/tmp/lmdr-stage0d-mount-err
   : > "$MOUNT_ERR_FILE" 2>/dev/null
   $MOUNT_BIN -t virtiofs lmdr-stage0d /worktree 2> "$MOUNT_ERR_FILE"
@@ -75,6 +79,18 @@ else
   fi
   rm -f "$MOUNT_ERR_FILE" 2>/dev/null
 fi
+echo "GUEST_VIRTIOFS_MOUNT_RESULT=$VIRTIOFS_MOUNT"
+
+GUEST_VIRTIOFS_DEVICE_SEEN=NO
+if [ -f /proc/mounts ]; then
+  while read -r m_src m_tgt m_fs m_opts m_rest; do
+    if [ "$m_src" = "lmdr-stage0d" ] && [ "$m_tgt" = "/worktree" ] && [ "$m_fs" = "virtiofs" ]; then
+      GUEST_VIRTIOFS_DEVICE_SEEN=YES
+      break
+    fi
+  done < /proc/mounts
+fi
+echo "GUEST_VIRTIOFS_DEVICE_SEEN=$GUEST_VIRTIOFS_DEVICE_SEEN"
 
 if [ "$VIRTIOFS_MOUNT" = "PASS" ]; then
   VIRTIOFS_GUEST_SUPPORT=PASS
@@ -92,17 +108,37 @@ echo "VIRTIOFS_MOUNT=$VIRTIOFS_MOUNT"
 echo "VIRTIOFS_MOUNT_ERROR=$VIRTIOFS_MOUNT_ERROR"
 echo "VIRTIOFS_GUEST_SUPPORT=$VIRTIOFS_GUEST_SUPPORT"
 
+echo "=== WORKTREE DEBUG ==="
+cat /proc/mounts
+/bin/busybox df -h /worktree 2>&1 || true
+/bin/busybox stat /worktree 2>&1 || true
+/bin/busybox touch /worktree/probe-test.txt 2>&1 || true
+/bin/busybox ls -la /worktree 2>&1 || true
+DIRECT_CAT_HOST_READ="$(cat /worktree/host-read.txt 2>&1)"
+DIRECT_CAT_HOST_READ_RC=$?
+echo "DIRECT_CAT_HOST_READ=$DIRECT_CAT_HOST_READ"
+echo "DIRECT_CAT_HOST_READ_RC=$DIRECT_CAT_HOST_READ_RC"
+DIRECT_CAT_PROBE_SPEC="$(cat /worktree/probe-spec.sh 2>&1)"
+DIRECT_CAT_PROBE_SPEC_RC=$?
+echo "DIRECT_CAT_PROBE_SPEC=$DIRECT_CAT_PROBE_SPEC"
+echo "DIRECT_CAT_PROBE_SPEC_RC=$DIRECT_CAT_PROBE_SPEC_RC"
+echo "=== END WORKTREE DEBUG ==="
+
 # ================= secondary channel: share-backed results file ===============
 R=/worktree/guest-results.txt
 R_WRITABLE=NO
 if [ "$VIRTIOFS_MOUNT" = "PASS" ]; then
-  : > "$R" 2>/dev/null && R_WRITABLE=YES
+  if ( echo -n "" > "$R" ) 2>/dev/null; then
+    R_WRITABLE=YES
+  fi
 fi
 echo "GUEST_RESULTS_WRITABLE=$R_WRITABLE"
 
 emit() {
   echo "$*"
-  if [ "$R_WRITABLE" = "YES" ]; then echo "$*" >> "$R"; fi
+  if [ "$R_WRITABLE" = "YES" ]; then
+    ( echo "$*" >> "$R" ) 2>/dev/null || true
+  fi
 }
 
 # ---- host HOME exposure: does not depend on the share ----
@@ -114,16 +150,19 @@ fi
 emit "GUEST_HOST_HOME_EXPOSED=$GUEST_HOST_HOME_EXPOSED"
 
 # ---- network device check: does not depend on the share ----
-GUEST_INTERFACES=""
+emit "GUEST_NETWORK_PROBE_STARTED=YES"
+GUEST_INTERFACES="NONE"
 GUEST_HAS_VIRTIO_NET=NO
 if [ -f /proc/net/dev ]; then
-  iface_list=$(grep -v 'lo:' /proc/net/dev 2>/dev/null | awk -F: 'NR>1 {print $1}' | tr -d ' ' | grep -v '^$' | tr '\n' ',')
-  GUEST_INTERFACES="${iface_list%,}"
-fi
-if [ -n "$GUEST_INTERFACES" ]; then
-  GUEST_HAS_VIRTIO_NET=YES
-else
-  GUEST_INTERFACES="NONE"
+  while read -r devline; do
+    case "$devline" in
+      *"lo:"*|*"Inter-"*|*"face"*) ;;
+      *":"*)
+        GUEST_HAS_VIRTIO_NET=YES
+        GUEST_INTERFACES="virtio-net"
+        ;;
+    esac
+  done < /proc/net/dev 2>/dev/null
 fi
 emit "GUEST_HAS_VIRTIO_NET=$GUEST_HAS_VIRTIO_NET"
 emit "GUEST_INTERFACES=$GUEST_INTERFACES"
@@ -184,17 +223,51 @@ if [ "$PROBE_SPEC_LOADED" != "YES" ]; then
 fi
 
 # --- IO gate ---
-GUEST_READ_VAL=$(cat /worktree/host-read.txt 2>/dev/null)
-if [ -n "$GUEST_READ_VAL" ] && [ "$GUEST_READ_VAL" != "NOT_FOUND" ]; then
+emit "GUEST_HOST_READ_ATTEMPTED=YES"
+READ_ERR_FILE=/tmp/lmdr-stage0d-read-err
+: > "$READ_ERR_FILE" 2>/dev/null
+GUEST_READ_VAL="$(cat /worktree/host-read.txt 2> "$READ_ERR_FILE")"
+READ_RC=$?
+READ_ERR="$(cat "$READ_ERR_FILE" 2>/dev/null)"
+rm -f "$READ_ERR_FILE" 2>/dev/null
+
+if [ "$READ_RC" -eq 0 ] && [ -n "$GUEST_READ_VAL" ]; then
+  GUEST_HOST_READ_RESULT="PASS"
+elif echo "$READ_ERR" | grep -qiE "operation not permitted|permission denied"; then
+  GUEST_HOST_READ_RESULT="POLICY_DENIED"
+else
+  GUEST_HOST_READ_RESULT="OTHER"
+fi
+emit "GUEST_HOST_READ_RESULT=$GUEST_HOST_READ_RESULT"
+emit "GUEST_READ_HOST_MARKER=$GUEST_READ_VAL"
+
+if [ "$GUEST_HOST_READ_RESULT" = "PASS" ] && { [ -z "$EXPECTED_HOST_MARKER" ] || [ "$GUEST_READ_VAL" = "$EXPECTED_HOST_MARKER" ]; }; then
   GUEST_HOST_TO_GUEST_READ="PASS"
 else
   GUEST_HOST_TO_GUEST_READ="FAIL"
 fi
 emit "GUEST_HOST_TO_GUEST_READ=$GUEST_HOST_TO_GUEST_READ"
 
+emit "GUEST_HOST_WRITE_ATTEMPTED=YES"
+WRITE_ERR_FILE=/tmp/lmdr-stage0d-write-err
+: > "$WRITE_ERR_FILE" 2>/dev/null
 GUEST_WRITE_MARKER="LMDR_STAGE0D_GUESTWRITE_$(head -c 8 /dev/urandom 2>/dev/null | od -An -tx1 | tr -d ' \n')"
-echo "$GUEST_WRITE_MARKER" > /worktree/guest-write.txt 2>/dev/null
-if [ -f /worktree/guest-write.txt ] && grep -q "$GUEST_WRITE_MARKER" /worktree/guest-write.txt 2>/dev/null; then
+( echo "$GUEST_WRITE_MARKER" > /worktree/guest-write.txt ) 2> "$WRITE_ERR_FILE" || true
+WRITE_RC=$?
+WRITE_ERR="$(cat "$WRITE_ERR_FILE" 2>/dev/null)"
+rm -f "$WRITE_ERR_FILE" 2>/dev/null
+
+if [ "$WRITE_RC" -eq 0 ] && [ -f /worktree/guest-write.txt ] && grep -q "$GUEST_WRITE_MARKER" /worktree/guest-write.txt 2>/dev/null; then
+  GUEST_HOST_WRITE_RESULT="PASS"
+elif echo "$WRITE_ERR" | grep -qiE "operation not permitted|permission denied"; then
+  GUEST_HOST_WRITE_RESULT="POLICY_DENIED"
+else
+  GUEST_HOST_WRITE_RESULT="OTHER"
+fi
+emit "GUEST_HOST_WRITE_RESULT=$GUEST_HOST_WRITE_RESULT"
+emit "GUEST_WRITE_MARKER=$GUEST_WRITE_MARKER"
+
+if [ "$GUEST_HOST_WRITE_RESULT" = "PASS" ]; then
   GUEST_GUEST_TO_HOST_WRITE="PASS"
 else
   GUEST_GUEST_TO_HOST_WRITE="FAIL"
@@ -202,6 +275,7 @@ fi
 emit "GUEST_GUEST_TO_HOST_WRITE=$GUEST_GUEST_TO_HOST_WRITE"
 
 # --- path-escape helper ---
+emit "GUEST_ESCAPE_PROBES_STARTED=YES"
 read_secret() {
   got=$(cat "/worktree/$1" 2>/dev/null)
   if [ -n "$got" ] && [ "$got" = "$SECRET" ]; then

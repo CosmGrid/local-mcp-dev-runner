@@ -363,7 +363,11 @@ final class ConsoleCapture: @unchecked Sendable {
 final class InlineParser: @unchecked Sendable {
     private let lock = NSLock()
     private var carry = ""
-    private(set) var guestFields: [String: String] = [:]
+    private var guestFields: [String: String] = [:]
+    var allFields: [String: String] {
+        lock.lock(); defer { lock.unlock() }
+        return guestFields
+    }
     private(set) var guestInitStarted = false
     private(set) var guestDoneSeen = false
 
@@ -371,8 +375,9 @@ final class InlineParser: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         guard let text = String(data: chunk, encoding: .utf8) ?? String(data: chunk, encoding: .isoLatin1) else { return }
         let combined = carry + text
-        let rawLines = combined.split(separator: "\n", omittingEmptySubsequences: false)
-        if combined.hasSuffix("\n") {
+        let normalized = combined.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
+        let rawLines = normalized.split(separator: "\n", omittingEmptySubsequences: false)
+        if normalized.hasSuffix("\n") {
             carry = ""
             for line in rawLines { processLine(String(line)) }
         } else {
@@ -392,16 +397,20 @@ final class InlineParser: @unchecked Sendable {
     private func processLine(_ raw: String) {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty { return }
-        if trimmed.contains("STAGE0D_GUEST_INIT_STARTED=YES") {
+        if trimmed.contains("STAGE0D_GUEST_INIT_STARTED=YES") || trimmed.contains("GUEST_INIT_STARTED=YES") {
             guestInitStarted = true
         }
         if trimmed.contains("STAGE0D_GUEST_DONE=YES") {
             guestDoneSeen = true
         }
         if let eqIdx = trimmed.firstIndex(of: "=") {
-            let key = String(trimmed[..<eqIdx])
-            let val = String(trimmed[trimmed.index(after: eqIdx)...])
-            guestFields[key] = val
+            let rawKey = String(trimmed[..<eqIdx])
+            let rawVal = String(trimmed[trimmed.index(after: eqIdx)...])
+            let cleanKey = rawKey.filter { $0.isLetter || $0.isNumber || $0 == "_" }
+            let cleanVal = rawVal.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !cleanKey.isEmpty {
+                guestFields[cleanKey] = cleanVal
+            }
         }
     }
 }
@@ -417,7 +426,8 @@ final class VMContext {
 
     // Full object lifecycle retention
     var bootLoader: VZLinuxBootLoader? = nil
-    var serialPort: VZVirtioConsoleDeviceSerialPortConfiguration? = nil
+    var consoleDevice: VZVirtioConsoleDeviceConfiguration? = nil
+    var consolePort: VZVirtioConsolePortConfiguration? = nil
     var sharedDirectory: VZSharedDirectory? = nil
     var singleDirectoryShare: VZSingleDirectoryShare? = nil
     var fileSystemDevice: VZVirtioFileSystemDeviceConfiguration? = nil
@@ -439,6 +449,33 @@ final class VMContext {
         if consoleReadFD >= 0 { close(consoleReadFD) }
         if consoleWriteFD >= 0 { close(consoleWriteFD) }
     }
+}
+
+func startConsoleReader(readFD: Int32, capture: ConsoleCapture, parser: InlineParser) -> DispatchSourceRead {
+    _ = fcntl(readFD, F_SETFL, O_NONBLOCK)
+    let source = DispatchSource.makeReadSource(
+        fileDescriptor: readFD,
+        queue: DispatchQueue.global(qos: .utility)
+    )
+    source.setEventHandler {
+        var buf = [UInt8](repeating: 0, count: 8192)
+        let chunkSize = buf.count
+        while true {
+            let n = buf.withUnsafeMutableBytes { read(readFD, $0.baseAddress, chunkSize) }
+            if n > 0 {
+                let chunk = Data(buf[0..<n])
+                capture.append(chunk)
+                parser.feed(chunk)
+            } else if n == 0 {
+                source.cancel()
+                return
+            } else {
+                break  // EAGAIN
+            }
+        }
+    }
+    source.resume()
+    return source
 }
 
 func buildVMConfiguration(manifest: ProbeManifest, ctx: VMContext) throws -> VZVirtualMachineConfiguration {
@@ -474,9 +511,13 @@ func buildVMConfiguration(manifest: ProbeManifest, ctx: VMContext) throws -> VZV
     fputs("VZ_SERIAL_ATTACHMENT_END\n", stdout); fflush(stdout)
 
     fputs("VZ_SERIAL_DEVICE_BEGIN\n", stdout); fflush(stdout)
-    let serialPort = VZVirtioConsoleDeviceSerialPortConfiguration()
-    serialPort.attachment = serialAttachment
-    ctx.serialPort = serialPort
+    let console = VZVirtioConsoleDeviceConfiguration()
+    let consolePort = VZVirtioConsolePortConfiguration()
+    consolePort.isConsole = true
+    consolePort.attachment = serialAttachment
+    console.ports[0] = consolePort
+    ctx.consoleDevice = console
+    ctx.consolePort = consolePort
     fputs("VZ_SERIAL_DEVICE_END\n", stdout); fflush(stdout)
 
     fputs("VZ_VIRTIOFS_SHARE_BEGIN\n", stdout); fflush(stdout)
@@ -486,6 +527,15 @@ func buildVMConfiguration(manifest: ProbeManifest, ctx: VMContext) throws -> VZV
     let singleShare = VZSingleDirectoryShare(directory: shareDir)
     ctx.sharedDirectory = shareDir
     ctx.singleDirectoryShare = singleShare
+    if let items = try? FileManager.default.contentsOfDirectory(atPath: manifest.sharePath) {
+        let accR = access(manifest.sharePath, R_OK)
+        let accW = access(manifest.sharePath, W_OK)
+        let hostReadFile = manifest.sharePath + "/host-read.txt"
+        let hostReadAcc = access(hostReadFile, R_OK)
+        fputs("HOST_DEBUG_SHARE_PATH=\(manifest.sharePath) accR=\(accR) accW=\(accW) hostReadAcc=\(hostReadAcc) ITEMS=\(items.joined(separator: ","))\n", stderr)
+    } else {
+        fputs("HOST_DEBUG_SHARE_PATH=\(manifest.sharePath) ITEMS=FAILED\n", stderr)
+    }
     fputs("VZ_VIRTIOFS_SHARE_END\n", stdout); fflush(stdout)
 
     fputs("VZ_VIRTIOFS_DEVICE_BEGIN\n", stdout); fflush(stdout)
@@ -499,7 +549,7 @@ func buildVMConfiguration(manifest: ProbeManifest, ctx: VMContext) throws -> VZV
     vmConfig.bootLoader = bootLoader
     vmConfig.cpuCount = 2
     vmConfig.memorySize = 512 * 1024 * 1024 // 512 MiB
-    vmConfig.serialPorts = [serialPort]
+    vmConfig.consoleDevices = [console]
     vmConfig.directorySharingDevices = [fsDev]
     vmConfig.networkDevices = []
     ctx.vmConfig = vmConfig
@@ -659,22 +709,8 @@ func runTestMode(manifestPath: String) {
             }
             vmCtx.vm = vm
 
-            // Start draining serial pipe asynchronously
-            let readHandle = FileHandle(fileDescriptor: vmCtx.consoleReadFD, closeOnDealloc: false)
-            vmCtx.fromGuestReadHandle = readHandle
-            let group = DispatchGroup()
-            group.enter()
-
-            readHandle.readabilityHandler = { handle in
-                let chunk = handle.availableData
-                if chunk.isEmpty {
-                    readHandle.readabilityHandler = nil
-                    group.leave()
-                } else {
-                    consoleCapture.append(chunk)
-                    inlineParser.feed(chunk)
-                }
-            }
+            // Start draining serial pipe asynchronously via DispatchSource
+            let consoleSource = startConsoleReader(readFD: vmCtx.consoleReadFD, capture: consoleCapture, parser: inlineParser)
 
             // Start VM on vmCtx.vmQueue
             let startGroup = DispatchGroup()
@@ -721,11 +757,19 @@ func runTestMode(manifestPath: String) {
                 vmRunning = "PASS"
 
                 // Wait for guest completion marker STAGE0D_GUEST_DONE=YES
+                var guestDoneSeen = false
                 let startWait = Date()
-                while Date().timeIntervalSince(startWait) < 45.0 {
-                    if inlineParser.guestDoneSeen { break }
+                let waitLimit: TimeInterval = 35.0
+                while Date().timeIntervalSince(startWait) < waitLimit {
+                    if inlineParser.guestDoneSeen {
+                        guestDoneSeen = true
+                        break
+                    }
                     Thread.sleep(forTimeInterval: 0.1)
                 }
+
+                // Settle briefly to drain remaining bytes
+                Thread.sleep(forTimeInterval: guestDoneSeen ? 0.8 : 0.2)
 
                 // Stop VM on vmQueue
                 let stopGroup = DispatchGroup()
@@ -764,7 +808,7 @@ func runTestMode(manifestPath: String) {
                 failedServiceOrPath = "Virtualization.framework"
             }
 
-            readHandle.readabilityHandler = nil
+            consoleSource.cancel()
             try? vmCtx.fromGuestWriteHandle?.close()
             inlineParser.flush()
 
@@ -787,8 +831,27 @@ func runTestMode(manifestPath: String) {
     report["FAILED_OPERATION"] = failedOperation
     report["FAILED_SERVICE_OR_PATH"] = failedServiceOrPath
 
-    // Parse guest fields
-    let guestFields = inlineParser.guestFields
+    // Parse guest fields from inline parser & share-backed file (dual channel)
+    var guestFields = inlineParser.allFields
+    fputs("HOST_DEBUG_INLINE_KEYS=\(guestFields.keys.joined(separator: ","))\n", stderr)
+    let resultsURL = URL(fileURLWithPath: manifest.sharePath).appendingPathComponent("guest-results.txt")
+    if let fileData = try? Data(contentsOf: resultsURL),
+       let fileStr = String(data: fileData, encoding: .utf8) {
+        let lines = fileStr.split(separator: "\n")
+        for line in lines {
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            if let eqIdx = trimmed.firstIndex(of: "=") {
+                let key = String(trimmed[..<eqIdx])
+                let val = String(trimmed[trimmed.index(after: eqIdx)...])
+                guestFields[key] = val
+            }
+        }
+    }
+
+    let completionSeen = (inlineParser.guestDoneSeen || guestFields["STAGE0D_GUEST_DONE"] == "YES")
+    report["GUEST_COMPLETION_SEEN"] = completionSeen ? "YES" : "NO"
+    report["GUEST_BOOT_TIMEOUT"] = completionSeen ? "NO" : "YES"
+
     let virtiofsMount = guestFields["VIRTIOFS_MOUNT"] ?? "NOT_RUN"
     let guestHostRead = guestFields["GUEST_HOST_TO_GUEST_READ"] ?? "NOT_RUN"
     let guestHostWrite = guestFields["GUEST_GUEST_TO_HOST_WRITE"] ?? "NOT_RUN"
@@ -808,10 +871,33 @@ func runTestMode(manifestPath: String) {
     report["GUEST_ABSOLUTE_PATH_ESCAPE"] = guestAbsEscape
     report["GUEST_HOST_HOME_EXPOSED"] = guestHostHome
     report["GUEST_HAS_VIRTIO_NET"] = guestVirtioNet
+    report["GUEST_INIT_STARTED"] = guestFields["GUEST_INIT_STARTED"] ?? (inlineParser.guestInitStarted ? "YES" : "NO")
+    report["GUEST_EARLY_USERSPACE_READY"] = guestFields["GUEST_EARLY_USERSPACE_READY"] ?? "NOT_RUN"
+    report["GUEST_VIRTIOFS_DEVICE_SEEN"] = guestFields["GUEST_VIRTIOFS_DEVICE_SEEN"] ?? "NOT_RUN"
+    report["GUEST_VIRTIOFS_MOUNT_ATTEMPTED"] = guestFields["GUEST_VIRTIOFS_MOUNT_ATTEMPTED"] ?? "NOT_RUN"
+    report["GUEST_VIRTIOFS_MOUNT_RESULT"] = guestFields["GUEST_VIRTIOFS_MOUNT_RESULT"] ?? (guestFields["VIRTIOFS_MOUNT"] ?? "NOT_RUN")
+    report["GUEST_HOST_READ_ATTEMPTED"] = guestFields["GUEST_HOST_READ_ATTEMPTED"] ?? "NOT_RUN"
+    report["GUEST_HOST_READ_RESULT"] = guestFields["GUEST_HOST_READ_RESULT"] ?? "NOT_RUN"
+    report["GUEST_HOST_WRITE_ATTEMPTED"] = guestFields["GUEST_HOST_WRITE_ATTEMPTED"] ?? "NOT_RUN"
+    report["GUEST_HOST_WRITE_RESULT"] = guestFields["GUEST_HOST_WRITE_RESULT"] ?? "NOT_RUN"
+    report["GUEST_ESCAPE_PROBES_STARTED"] = guestFields["GUEST_ESCAPE_PROBES_STARTED"] ?? "NOT_RUN"
+    report["GUEST_NETWORK_PROBE_STARTED"] = guestFields["GUEST_NETWORK_PROBE_STARTED"] ?? "NOT_RUN"
+    report["STAGE0D_GUEST_DONE"] = completionSeen ? "YES" : "NO"
+
+    // Host-side verification of Guest write-back file
+    let guestWriteURL = URL(fileURLWithPath: manifest.sharePath).appendingPathComponent("guest-write.txt")
+    var hostVerifiedGuestWrite = false
+    if let expectedMarker = guestFields["GUEST_WRITE_MARKER"], !expectedMarker.isEmpty,
+       let writeContent = try? String(contentsOf: guestWriteURL, encoding: .utf8) {
+        if writeContent.contains(expectedMarker) {
+            hostVerifiedGuestWrite = true
+        }
+    }
 
     let guestPass = (virtiofsMount == "PASS") &&
                     (guestHostRead == "PASS") &&
                     (guestHostWrite == "PASS") &&
+                    hostVerifiedGuestWrite &&
                     (guestDotdot == "PASS") &&
                     (guestSymlinkRel == "PASS") &&
                     (guestSymlinkAbs == "PASS") &&
@@ -865,6 +951,13 @@ func runTestMode(manifestPath: String) {
         report["STAGE0D_RESULT"] = "FAIL"
         report["BLOCK_REASON"] = (blockReason != "NONE") ? blockReason : "CONTAINMENT_OR_ISOLATION_FAILED"
     }
+
+    let capData = consoleCapture.snapshot()
+    let capStr = String(data: capData, encoding: .utf8) ?? String(data: capData, encoding: .isoLatin1) ?? "(no console output)"
+    fputs("=== GUEST CONSOLE CAPTURE (\(capData.count) bytes) ===\n\(capStr)\n=== END GUEST CONSOLE CAPTURE ===\n", stderr)
+    let lines = capStr.split(separator: "\n")
+    let tailLines = lines.suffix(40).joined(separator: "\n")
+    report["CONSOLE_LOG_SNIPPET"] = tailLines
 
     report["FRAMEWORK_WORKER_TRUST_BOUNDARY"] = "TRUSTED_OS_SERVICE_OUTSIDE_HELPER_SEATBELT"
 

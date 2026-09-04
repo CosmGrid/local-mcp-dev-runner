@@ -86,13 +86,14 @@ if [[ "$CONTENT" == *"(literal \"/\")"* ]] || [[ "$CONTENT" == *"(subpath \"/\")
 fi
 echo "PASS: Fixture 1.9 - NO_FILESYSTEM_SCOPE_EXPANSION=PASS"
 
-echo "PASS: Fixture 1 - STAGE0D_CAPABILITY_DELTA=FUSE_EXTENSION_ONLY verified"
+echo "PASS: Fixture 1 - STAGE0D_CAPABILITY_DELTA=FUSE_EXTENSION_AND_PATH_EXTENSION verified"
 
 # ----------------------------------------------------
 # Fixture 2: Profile Generation Success
 # ----------------------------------------------------
 F2_TMP="/tmp/lmdr-p35-stage0d-profilegen-test"
 mkdir -p "$F2_TMP/allowed/helper"
+mkdir -p "$F2_TMP/allowed/share"
 F2_CANONICAL="$(realpath "$F2_TMP")"
 F2_ALLOWED="$F2_CANONICAL/allowed"
 F2_HELPER="$F2_ALLOWED/helper/stage0d-vz-tool"
@@ -103,6 +104,7 @@ F2_PROFILE="$F2_CANONICAL/profile.sb"
 node "$HERE/generate-profile.mjs" \
   --allowed-dir "$F2_ALLOWED" \
   --helper-bin "$F2_HELPER" \
+  --share-dir "$F2_ALLOWED/share" \
   --run-id "testrun123" \
   --output "$F2_PROFILE"
 
@@ -516,6 +518,132 @@ test_vm_start_smoke_sm() {
 [ "$(test_vm_start_smoke_sm 0 132 "4")" = "REASON=VM_START_SIGILL" ]
 [ "$(test_vm_start_smoke_sm 0 0 "NONE")" = "REASON=NONE" ]
 echo "PASS: Fixture 14 - VM_START_SMOKE_STATE_MACHINE=PASS"
+
+# ----------------------------------------------------
+# Fixture 15: Guest Console Device & Completion Semantics
+# ----------------------------------------------------
+if ! grep -q "vmConfig.consoleDevices = \[console\]" "$MAIN_SWIFT" || \
+   ! grep -q "startConsoleReader(readFD:" "$MAIN_SWIFT" || \
+   ! grep -q "GUEST_COMPLETION_SEEN" "$MAIN_SWIFT" || \
+   ! grep -q "GUEST_BOOT_TIMEOUT" "$MAIN_SWIFT"; then
+  echo "FAIL: Fixture 15 - Guest console device & completion check failed"
+  exit 1
+fi
+echo "PASS: Fixture 15 - GUEST_CONSOLE_AND_WAIT_SEMANTICS=PASS"
+
+# ----------------------------------------------------
+# Fixture 16: R7 Minimum Path Extension & Evidence Harness
+# ----------------------------------------------------
+STAGE0D_TEMPLATE="$HERE/expected/profile.sb.template"
+CONTENT_R7=$(grep -v '^;' "$STAGE0D_TEMPLATE" | tr '\n' ' ')
+
+# 1. PATH_EXTENSION_RULE_PRESENT
+if [[ "$CONTENT_R7" =~ \(allow[[:space:]]+file-issue-extension[[:space:]]+\([[:space:]]*require-all[[:space:]]+\([[:space:]]*extension-class[[:space:]]+\"com\.apple\.app-sandbox\.read-write\"[[:space:]]*\)[[:space:]]+\([[:space:]]*subpath[[:space:]]+\"%%SHARE_DIR%%\"[[:space:]]*\)[[:space:]]*\)[[:space:]]*\) ]]; then
+  echo "PASS: Fixture 16.1 - PATH_EXTENSION_RULE_PRESENT=PASS"
+else
+  echo "FAIL: Fixture 16.1 - PATH_EXTENSION_RULE_PRESENT failed"
+  exit 1
+fi
+
+# 2. PATH_EXTENSION_CLASS_EXACT
+if [[ "$CONTENT_R7" == *"\"com.apple.app-sandbox.read-write\""* ]]; then
+  echo "PASS: Fixture 16.2 - PATH_EXTENSION_CLASS_EXACT=PASS"
+else
+  echo "FAIL: Fixture 16.2 - PATH_EXTENSION_CLASS_EXACT failed"
+  exit 1
+fi
+
+# 3. PATH_EXTENSION_SCOPE_EXACT_SHARE
+F16_TMP="/tmp/lmdr-p35-stage0d-f16-test"
+mkdir -p "$F16_TMP/allowed/helper" "$F16_TMP/allowed/share"
+F16_CANONICAL="$(realpath "$F16_TMP")"
+F16_ALLOWED="$F16_CANONICAL/allowed"
+F16_HELPER="$F16_ALLOWED/helper/stage0d-vz-tool"
+touch "$F16_HELPER"
+chmod 0755 "$F16_HELPER"
+F16_PROFILE="$F16_CANONICAL/profile.sb"
+node "$HERE/generate-profile.mjs" \
+  --allowed-dir "$F16_ALLOWED" \
+  --helper-bin "$F16_HELPER" \
+  --share-dir "$F16_ALLOWED/share" \
+  --run-id "testrunf16" \
+  --output "$F16_PROFILE"
+
+F16_SHARE="$(realpath "$F16_ALLOWED/share")"
+if grep -q "subpath \"$F16_SHARE\"" "$F16_PROFILE"; then
+  echo "PASS: Fixture 16.3 - PATH_EXTENSION_SCOPE_EXACT_SHARE=PASS"
+else
+  echo "FAIL: Fixture 16.3 - PATH_EXTENSION_SCOPE_EXACT_SHARE failed"
+  exit 1
+fi
+
+# 4. NO_PATH_EXTENSION_WILDCARD
+if grep -q "subpath \"\*" "$F16_PROFILE" || grep -q "extension-class \"\*" "$F16_PROFILE"; then
+  echo "FAIL: Fixture 16.4 - wildcard in path extension detected"
+  exit 1
+fi
+echo "PASS: Fixture 16.4 - NO_PATH_EXTENSION_WILDCARD=PASS"
+
+# 5. NO_ALLOWED_ROOT_SCOPE
+if grep "file-issue-extension" -A 5 "$F16_PROFILE" | grep -q "subpath \"$F16_ALLOWED\""; then
+  echo "FAIL: Fixture 16.5 - allowed root scope leaked into file-issue-extension"
+  exit 1
+fi
+echo "PASS: Fixture 16.5 - NO_ALLOWED_ROOT_SCOPE=PASS"
+
+# 6. NO_RUN_DIR_SCOPE
+if grep -q "subpath \"$F16_CANONICAL\"" "$F16_PROFILE"; then
+  echo "FAIL: Fixture 16.6 - run dir scope detected"
+  exit 1
+fi
+echo "PASS: Fixture 16.6 - NO_RUN_DIR_SCOPE=PASS"
+
+# 7. NO_PRIVATE_TMP_SCOPE
+if grep -q "subpath \"/private/tmp\"" "$F16_PROFILE" || grep -q "subpath \"/tmp\"" "$F16_PROFILE"; then
+  echo "FAIL: Fixture 16.7 - /private/tmp scope detected"
+  exit 1
+fi
+echo "PASS: Fixture 16.7 - NO_PRIVATE_TMP_SCOPE=PASS"
+
+# 8. NO_SECOND_EXTENSION_CLASS
+if grep -q "com.apple.app-sandbox.read\"" "$F16_PROFILE" && ! grep -q "com.apple.app-sandbox.read-write\"" "$F16_PROFILE"; then
+  echo "FAIL: Fixture 16.8 - invalid single read class"
+  exit 1
+fi
+CLASS_COUNT=$(grep -o "extension-class" "$F16_PROFILE" | wc -l | tr -d ' ')
+if [ "$CLASS_COUNT" -ne 2 ]; then
+  echo "FAIL: Fixture 16.8 - expected exactly 2 extension-class rules (FUSE + read-write path), got $CLASS_COUNT"
+  exit 1
+fi
+echo "PASS: Fixture 16.8 - NO_SECOND_EXTENSION_CLASS=PASS"
+rm -rf "$F16_CANONICAL"
+
+# 9. DIRECT_CAT_RC_CAPTURE
+GUEST_INIT="$HERE/guest/stage0d-init"
+if ! grep -qE "DIRECT_CAT_HOST_READ=\"?\\$\(cat /worktree/host-read.txt 2>&1\)\"?" "$GUEST_INIT" || \
+   ! grep -qE "DIRECT_CAT_HOST_READ_RC=\"?\\$\\?\"?" "$GUEST_INIT"; then
+  echo "FAIL: Fixture 16.9 - DIRECT_CAT_RC_CAPTURE missing in stage0d-init"
+  exit 1
+fi
+echo "PASS: Fixture 16.9 - DIRECT_CAT_RC_CAPTURE=PASS"
+
+# 10. ATTEMPTED_RESULT_SEPARATION
+if ! grep -q "GUEST_HOST_READ_ATTEMPTED=YES" "$GUEST_INIT" || \
+   ! grep -q "GUEST_HOST_READ_RESULT=\$GUEST_HOST_READ_RESULT" "$GUEST_INIT" || \
+   ! grep -q "GUEST_HOST_WRITE_ATTEMPTED=YES" "$GUEST_INIT" || \
+   ! grep -q "GUEST_HOST_WRITE_RESULT=\$GUEST_HOST_WRITE_RESULT" "$GUEST_INIT"; then
+  echo "FAIL: Fixture 16.10 - ATTEMPTED_RESULT_SEPARATION missing in stage0d-init"
+  exit 1
+fi
+echo "PASS: Fixture 16.10 - ATTEMPTED_RESULT_SEPARATION=PASS"
+
+# 11. DEVICE_SEEN_PROC_MOUNTS
+if ! grep -q "while read -r m_src m_tgt m_fs m_opts m_rest; do" "$GUEST_INIT" || \
+   ! grep -q '\[ "$m_src" = "lmdr-stage0d" \] && \[ "$m_tgt" = "/worktree" \] && \[ "$m_fs" = "virtiofs" \]' "$GUEST_INIT"; then
+  echo "FAIL: Fixture 16.11 - DEVICE_SEEN_PROC_MOUNTS parser missing in stage0d-init"
+  exit 1
+fi
+echo "PASS: Fixture 16.11 - DEVICE_SEEN_PROC_MOUNTS=PASS"
 
 echo "========================================="
 echo "ALL STAGE 0D FIXTURES PASSED"
