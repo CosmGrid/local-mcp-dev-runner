@@ -97,7 +97,7 @@ function validate(instance, schema, path = "$") {
 }
 
 describe("output schema — tool discovery", () => {
-  it("exposes a strict outputSchema for all 22 baseline tools", async () => {
+  it("exposes a strict outputSchema for all 24 tools", async () => {
     await createFixture().then(async (fixture) => {
       const handle = await openRunner(fixture);
       try {
@@ -260,6 +260,59 @@ describe("output schema — structured result validation", () => {
         assert.equal(res.isError, true, "run_script must remain denied by default");
         assert.equal(res.structuredContent, undefined,
           "denied run_script must not emit structuredContent");
+      } finally {
+        await handle.close();
+        await fixture.cleanup();
+      }
+    });
+  });
+
+  it("keeps github repository tools fail-closed without credential/config and emits no structuredContent", async () => {
+    await createFixture().then(async (fixture) => {
+      const handle = await openRunner(fixture);
+      try {
+        const schemas = await loadSchemaMap(handle.client);
+
+        const resInfo = await handle.client.callTool({
+          name: "github_repository_info",
+          arguments: { organization: "CosmGrid", repository: "test-repo" }
+        });
+        assert.equal(resInfo.isError, true, "github_repository_info must fail-closed by default");
+        assert.equal(resInfo.structuredContent, undefined);
+
+        const resCreate = await handle.client.callTool({
+          name: "github_repository_create",
+          arguments: { organization: "CosmGrid", name: "test-repo", visibility: "private" }
+        });
+        assert.equal(resCreate.isError, true, "github_repository_create must fail-closed by default");
+        assert.equal(resCreate.structuredContent, undefined);
+
+        // Validate sample successful payloads against the actual exposed schemas
+        const sampleInfo = {
+          exists: true,
+          owner: "CosmGrid",
+          name: "test-repo",
+          visibility: "private",
+          defaultBranch: "main",
+          fork: false,
+          archived: false,
+          repositoryUrl: "https://github.com/CosmGrid/test-repo"
+        };
+        const infoErrors = validate(sampleInfo, schemas.github_repository_info);
+        assert.equal(infoErrors.length, 0, `sample info schema validation failed: ${infoErrors.join(", ")}`);
+
+        const sampleCreate = {
+          created: true,
+          status: "CREATED",
+          owner: "CosmGrid",
+          name: "test-repo",
+          visibility: "private",
+          repositoryUrl: "https://github.com/CosmGrid/test-repo",
+          cloneUrl: "https://github.com/CosmGrid/test-repo.git",
+          defaultBranch: "main"
+        };
+        const createErrors = validate(sampleCreate, schemas.github_repository_create);
+        assert.equal(createErrors.length, 0, `sample create schema validation failed: ${createErrors.join(", ")}`);
       } finally {
         await handle.close();
         await fixture.cleanup();

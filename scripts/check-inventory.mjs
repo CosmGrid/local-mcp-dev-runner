@@ -46,7 +46,9 @@ export const EXPECTED_TOOLS = [
   "git_worktree_remove",
   "git_commit",
   "project_scripts",
-  "run_script"
+  "run_script",
+  "github_repository_info",
+  "github_repository_create"
 ];
 
 function parseArgs(argv) {
@@ -100,9 +102,9 @@ try {
   const names = tools.map((tool) => tool.name).sort();
   const expected = [...EXPECTED_TOOLS].sort();
 
-  if (tools.length !== 22) {
+  if (tools.length !== EXPECTED_TOOLS.length) {
     exitCode = 1;
-    console.error(`FAIL  expected 22 tools, got ${tools.length}`);
+    console.error(`FAIL  expected ${EXPECTED_TOOLS.length} tools, got ${tools.length}`);
     console.error(`      ${names.join(", ")}`);
   } else if (JSON.stringify(names) !== JSON.stringify(expected)) {
     exitCode = 1;

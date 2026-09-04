@@ -116,13 +116,17 @@ async function main() {
       }
     }
 
-    if (added.length === 0 && removed.length === 0 && changed.length === 0) {
-      console.log(`INPUT_SCHEMA_COMPATIBILITY=PASS (${baselineNames.length} tools, no input-schema changes vs ${BASELINE_REF})`);
+    const ALLOWED_NEW_TOOLS = new Set(["github_repository_create", "github_repository_info"]);
+    const unexpectedAdded = added.filter((n) => !ALLOWED_NEW_TOOLS.has(n));
+
+    if (unexpectedAdded.length === 0 && removed.length === 0 && changed.length === 0) {
+      const extensionMsg = added.length > 0 ? ` + ${added.length} sanctioned extensions: ${added.join(", ")}` : "";
+      console.log(`INPUT_SCHEMA_COMPATIBILITY=PASS (${baselineNames.length} baseline tools byte-for-byte unchanged${extensionMsg} vs ${BASELINE_REF})`);
       process.exit(0);
     }
 
     console.error("INPUT_SCHEMA_COMPATIBILITY=FAIL");
-    if (added.length) console.error(`  added tools:   ${added.join(", ")}`);
+    if (unexpectedAdded.length) console.error(`  unexpected added tools: ${unexpectedAdded.join(", ")}`);
     if (removed.length) console.error(`  removed tools: ${removed.join(", ")}`);
     if (changed.length) {
       console.error(`  changed input schemas:`);

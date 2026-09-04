@@ -14,6 +14,10 @@ import { createBackend } from "./scripts/sandbox-backend.mjs";
 import { executeScript, killSwitchStatus, projectScriptReport } from "./scripts/script-execution.mjs";
 import { REASON } from "./scripts/script-policy.mjs";
 
+// Restricted GitHub repository management
+import { GitHubApiClient } from "./scripts/github-client.mjs";
+import { getRepositoryInfo, createRepository } from "./scripts/github-manager.mjs";
+
 const CONFIG_FILE = path.join(os.homedir(), ".config", "local-mcp-dev-runner", "projects.json");
 const WORKTREE_BASE = path.join(os.homedir(), ".local", "share", "local-mcp-dev-runner", "worktrees");
 const MAX_FILE_BYTES = 200 * 1024;
@@ -1603,6 +1607,129 @@ server.registerTool(
   }
 );
 
+const GITHUB_KEYCHAIN_SERVICE = "local-mcp-dev-runner-github-api-token";
+
+async function readKeychainToken() {
+  try {
+    const { stdout } = await execFileAsync("/usr/bin/security", [
+      "find-generic-password",
+      "-s", GITHUB_KEYCHAIN_SERVICE,
+      "-w"
+    ], {
+      timeout: 5000,
+      encoding: "utf8"
+    });
+    const token = stdout.trim();
+    if (!token) {
+      throw new Error("Empty credential in keychain");
+    }
+    return token;
+  } catch (error) {
+    throw new Error(
+      formatUserError(
+        "GITHUB_CREDENTIAL_MISSING",
+        `GitHub API credential missing in macOS Keychain for service "${GITHUB_KEYCHAIN_SERVICE}"`,
+        `Store token with: security add-generic-password -s "${GITHUB_KEYCHAIN_SERVICE}" -a "github" -w "<TOKEN>"`
+      )
+    );
+  }
+}
+
+const githubClient = new GitHubApiClient();
+
+server.registerTool(
+  "github_repository_info",
+  {
+    title: "Get GitHub repository information",
+    description:
+      "Query metadata for a GitHub repository under an allowlisted organization. " +
+      "Returns existence, owner, visibility, default branch, fork/archived flags, and repository URL.",
+    inputSchema: z
+      .object({
+        organization: z.string().min(1).describe("Allowlisted GitHub organization name (e.g. CosmGrid)"),
+        repository: z.string().min(1).describe("Repository name to query")
+      })
+      .strict(),
+    outputSchema: z
+      .object({
+        exists: z.boolean(),
+        owner: z.string().nullable(),
+        name: z.string().nullable(),
+        visibility: z.string().nullable(),
+        defaultBranch: z.string().nullable(),
+        fork: z.boolean().nullable(),
+        archived: z.boolean().nullable(),
+        repositoryUrl: z.string().nullable()
+      })
+      .strict()
+  },
+  async ({ organization, repository }) => {
+    const registry = await loadRegistry();
+    const runtimeRoot = path.join(os.homedir(), ".local", "share", "local-mcp-dev-runner");
+    const result = await getRepositoryInfo({
+      registry,
+      organization,
+      repository,
+      tokenReader: readKeychainToken,
+      client: githubClient,
+      runtimeRoot
+    });
+    const summary = result.exists
+      ? `github_repository_info: ${result.owner}/${result.name} exists (${result.visibility}, default branch: ${result.defaultBranch || "none"})`
+      : `github_repository_info: ${result.owner}/${result.name} does not exist`;
+    return structured(result, summary);
+  }
+);
+
+server.registerTool(
+  "github_repository_create",
+  {
+    title: "Create GitHub repository",
+    description:
+      "Create a new repository under an allowlisted GitHub organization with specified visibility (public or private). " +
+      "Idempotent: returns ALREADY_EXISTS if repository already exists with matching visibility. " +
+      "Does NOT initialize with README/license/gitignore, does NOT push code, does NOT configure remotes.",
+    inputSchema: z
+      .object({
+        organization: z.string().min(1).describe("Allowlisted GitHub organization name (e.g. CosmGrid)"),
+        name: z.string().min(1).describe("Repository name"),
+        visibility: z.enum(["public", "private"]).describe("Repository visibility: public or private"),
+        description: z.string().max(350).optional().describe("Optional repository description")
+      })
+      .strict(),
+    outputSchema: z
+      .object({
+        created: z.boolean(),
+        status: z.enum(["CREATED", "ALREADY_EXISTS"]),
+        owner: z.string(),
+        name: z.string(),
+        visibility: z.string(),
+        repositoryUrl: z.string(),
+        cloneUrl: z.string(),
+        defaultBranch: z.string().nullable()
+      })
+      .strict()
+  },
+  async ({ organization, name, visibility, description }) => {
+    const registry = await loadRegistry();
+    const runtimeRoot = path.join(os.homedir(), ".local", "share", "local-mcp-dev-runner");
+    const result = await createRepository({
+      registry,
+      organization,
+      name,
+      visibility,
+      description,
+      tokenReader: readKeychainToken,
+      client: githubClient,
+      runtimeRoot
+    });
+    const summary = result.created
+      ? `github_repository_create: created ${result.owner}/${result.name} (${result.visibility}) at ${result.repositoryUrl}`
+      : `github_repository_create: repository ${result.owner}/${result.name} already exists (${result.visibility}) at ${result.repositoryUrl}`;
+    return structured(result, summary);
+  }
+);
+
 async function handleCliInit() {
   const args = process.argv.slice(2);
   const isInit = args.includes("--init");
@@ -1631,6 +1758,12 @@ async function handleCliInit() {
       "Add project entries under 'projects' below.",
       "Projects default to read-only (write=false). To make changes, use git_worktree_create."
     ].join(" "),
+    github: {
+      enabled: false,
+      allowedOrganizations: [
+        "CosmGrid"
+      ]
+    },
     projects: {},
     _template: {
       _doc: "Copy this block into projects.<name> and fill in the absolute root path.",
@@ -1696,6 +1829,25 @@ async function runStartupHealthCheck() {
     checks.push(`SANDBOX_BACKEND=${probe.available ? "AVAILABLE" : "UNAVAILABLE"}`);
   } catch {
     checks.push("SANDBOX_BACKEND=UNKNOWN");
+  }
+
+  // Check 4: GITHUB capability
+  if (parsedRegistry?.github?.enabled === true) {
+    const orgs = parsedRegistry.github.allowedOrganizations || [];
+    checks.push(`GITHUB_CAPABILITY=ENABLED (allowed: ${orgs.join(", ") || "none"})`);
+  } else {
+    checks.push("GITHUB_CAPABILITY=DISABLED");
+  }
+
+  // Check 5: GITHUB Keychain credential
+  try {
+    const probe = await execFileAsync("/usr/bin/security", [
+      "find-generic-password",
+      "-s", GITHUB_KEYCHAIN_SERVICE
+    ], { timeout: 3000 }).then(() => true).catch(() => false);
+    checks.push(`GITHUB_KEYCHAIN_CREDENTIAL=${probe ? "PRESENT" : "MISSING"}`);
+  } catch {
+    checks.push("GITHUB_KEYCHAIN_CREDENTIAL=UNKNOWN");
   }
 
   return checks;

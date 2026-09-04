@@ -12,10 +12,11 @@
   "scripts": {
     "start": "node server.mjs",
     "check": "node scripts/check-syntax.mjs",
-    "test": "node --test --test-concurrency=4 tests/*.test.mjs tests/security/*.test.mjs tests/p2/*.test.mjs",
+    "test": "node --test --test-concurrency=4 tests/*.test.mjs tests/security/*.test.mjs tests/p2/*.test.mjs tests/github/*.test.mjs",
     "test:inventory": "node --test tests/inventory.test.mjs",
     "test:security": "node --test --test-concurrency=4 tests/security/*.test.mjs",
     "test:p2": "node --test --test-concurrency=4 tests/p2/*.test.mjs",
+    "test:github": "node --test --test-concurrency=4 tests/github/*.test.mjs",
     "gate:security": "node scripts/check-security-policies.mjs",
     "gate:inventory": "node scripts/check-inventory.mjs",
     "gate:secret-scan": "bash scripts/secret-scan.sh",

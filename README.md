@@ -2,13 +2,13 @@
 
 一个运行在你自己机器上的 **stdio MCP server**，让 ChatGPT（经由 Secure MCP Tunnel）能够 **只读** 地查看你本地已注册的 Git 仓库，并在严格受限的 runner-managed worktree 里做有限的写入。
 
-版本：1.1.0 · 工具数：22 · 状态：V1 baseline + 结构化输出契约（A3 OUTPUT-SCHEMA）
+版本：2.1.0 · 工具数：24 · 状态：V1 baseline + 结构化输出契约（A3）+ P2 沙箱执行 + 受限 GitHub 仓库管理
 
 ---
 
 ## 1. 它是什么
 
-一个单文件的 MCP server（`server.mjs`），通过标准输入输出与 MCP 客户端通信。它对外暴露 22 个工具，覆盖：
+一个单文件的 MCP server（`server.mjs`），通过标准输入输出与 MCP 客户端通信。它对外暴露 24 个工具，覆盖：
 
 | 类别 | 工具 |
 | --- | --- |
@@ -19,6 +19,7 @@
 | 受控分支与工作区 | `git_create_branch`、`git_worktree_create`、`git_worktree_remove` |
 | 受控提交 | `git_commit` |
 | 脚本（**沙箱受控 · v2.0.0**） | `project_scripts`、`run_script`（仅 npm/pnpm，hash 钉死，macOS Seatbelt 沙箱） |
+| 受限 GitHub 管理 | `github_repository_info`、`github_repository_create`（白名单组织、Keychain 凭证、幂等创建、无 push、无 delete） |
 
 > **结构化输出（v1.1.0 新增）**：每个工具现在都声明了 `outputSchema`，成功返回在原有文本 `content` 之外还携带机器可解析的 `structuredContent`，MCP 客户端（ChatGPT 等）可以稳定地按字段名取值，而不必解析自由文本。输入契约（`inputSchema`）零变更。
 
@@ -188,8 +189,33 @@ npm run verify:runtime  # 校验已部署的 runtime（只读）
 cd /path/to/local-mcp-dev-runner && bash scripts/run-native-sandbox-gate.sh
 ```
 
-设计权威与全部冻结约束见 [docs/P2_PROCESS_SANDBOX_DESIGN.md](docs/P2_PROCESS_SANDBOX_DESIGN.md)。注意：**本阶段未触发 runtime 部署**，线上 runner 仍停留在 v1.1.0；P2 沙箱目前是随源码提交的能力，尚未进入部署产物。
+设计权威与全部冻结约束见 [docs/P2_PROCESS_SANDBOX_DESIGN.md](docs/P2_PROCESS_SANDBOX_DESIGN.md)。
 
-## 12. 许可与状态
+## 12. 受限 GitHub 仓库管理（v2.1.0）
+
+v2.1.0 引入受限的 GitHub 仓库管理工具集（`github_repository_info` 与 `github_repository_create`），用于在明确授权的组织下查询与自动创建空仓库：
+
+- **核心边界声明：GitHub 仓库创建 != Git push！**
+  - Runner **仅**通过 GitHub 官方 HTTPS REST API 建立或查询空仓库，**绝对不包含 `git push`、`git pull`、`git fetch` 等操作**。
+  - 现有的 `NO_GIT_PUSH=YES` 安全边界与所有本地 Git 约束 100% 保持不变。
+- **组织白名单（Organization Allowlist）：**
+  - 必须在 `projects.json` 中明确配置 `github.allowedOrganizations`（例如 `["CosmGrid"]`）。
+  - 任何未在白名单中的组织请求一律 **FAIL-CLOSED** 拒绝执行。
+- **macOS Keychain 凭证管理：**
+  - GitHub Token 绝对禁止写入代码、配置文件、环境变量、日志或返回给客户端。
+  - 凭证存储于系统 macOS Keychain（服务名：`local-mcp-dev-runner-github-api-token`）。
+  - 配置命令：
+    ```bash
+    security add-generic-password -s "local-mcp-dev-runner-github-api-token" -a "github" -w "<YOUR_GITHUB_TOKEN>"
+    ```
+  - Runner 仅在 API 请求瞬间在内存读取，用后即脱敏，凭证缺失时立即 FAIL-CLOSED。
+- **严格幂等性与安全限制：**
+  - 仓库已存在且可见性一致时，幂等返回 `ALREADY_EXISTS`，不重复创建。
+  - 仓库已存在但可见性冲突时，返回 `GITHUB_VISIBILITY_CONFLICT`，拒绝自动更改。
+  - 严禁包含删除仓库（`delete_repository`）、重命名、归档、修改可见性、变更权限等危险能力。
+  - 固定 Host 为 `https://api.github.com`，防 SSRF 与任意 URL 注入。
+  - 所有操作均记入 `$RUNTIME_ROOT/logs/github-audit.log` 审计日志，敏感字段全脱敏。
+
+## 13. 许可与状态
 
 私有项目，未对外发布。本仓库只建立本地 Git 仓库，不做 push。

@@ -114,3 +114,33 @@ v1.0 的判定只检查 **attributes**，不检查 config。判定顺序：
 - **拒绝服务。** 大量并发调用可以拖慢机器。没有速率限制。
 - **Tunnel 侧。** 身份认证与传输安全由 Tunnel 承担，不在本仓库范围内。
 - **本机其他进程。** 如果机器上已有恶意软件，runner 不提供额外保护。
+
+## 7. 受限 GitHub 管理安全边界（v2.1.0）
+
+v2.1.0 引入的 `github_repository_info` 与 `github_repository_create` 遵循以下绝对安全原则：
+
+1. **不可变冻结策略保持（Freeze Principles）：**
+   - `NO_ARBITRARY_SHELL=YES`
+   - `NO_GIT_PUSH=YES`
+   - `NO_DEPLOY=YES`
+   - `NO_SECRET_OUTPUT=YES`
+   - `NO_ENV_SECRET_READ=YES`
+   - `NO_KEYCHAIN_SECRET_OUTPUT=YES`
+   - `NO_MAIN_MASTER_DIRECT_WRITE=YES`
+   - `NO_SECURITY_POLICY_BYPASS=YES`
+2. **凭据安全（macOS Keychain Only）：**
+   - GitHub Token 只能存储在系统 macOS Keychain 中（服务名：`local-mcp-dev-runner-github-api-token`）。
+   - 严禁写入代码、配置文件、环境变量（.env）、Git remote 或测试 fixture。
+   - 凭证缺失或未在 Keychain 找到时，必须 **FAIL-CLOSED** 拒绝执行，绝不 fallback 到不安全介质。
+   - 错误消息与审计日志执行多层脱敏，确保 token 绝不回显至客户端或控制台。
+3. **组织与输入白名单（Organization Allowlist & Strict Input）：**
+   - 仅允许经由 `projects.json` 中 `github.allowedOrganizations` 显式授权的 Organization。
+   - 仓库名称与组织名称使用严苛正则校验，杜绝任何控制字符、路径穿越与注入。
+   - 可见性仅限 `public` 和 `private`，拒绝 `internal` 或任意传值。
+4. **网络与端点固定（Fixed Endpoint · No SSRF）：**
+   - 目标 Host 固定为 `https://api.github.com`。
+   - 不提供通用 HTTP 请求工具，不接受用户传入 URL，彻底阻断 SSRF。
+5. **最小权限与能力边界（Strictly Bounded Mutation）：**
+   - 仅允许新建空仓库（`auto_init: false`）与元数据查询。
+   - 明确禁止删除仓库（`delete_repository`）、重命名、归档、修改权限、管理 Actions/Secrets、合并分支等操作。
+   - 明确声明：**GitHub 仓库创建 != Git push**，禁止任何自动 push 操作。

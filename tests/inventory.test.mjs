@@ -32,16 +32,18 @@ export const EXPECTED_TOOLS = [
   "git_worktree_remove",
   "git_commit",
   "project_scripts",
-  "run_script"
+  "run_script",
+  "github_repository_info",
+  "github_repository_create"
 ];
 
 describe("tool inventory", () => {
-  it("exposes exactly the 22 baseline tools", async () => {
+  it("exposes exactly the 24 tools (22 baseline + 2 restricted github)", async () => {
     await withFixtureAndRunner({}, async (client) => {
       const { tools } = await client.listTools();
       const names = tools.map((tool) => tool.name).sort();
 
-      assert.equal(tools.length, 22, `expected 22 tools, got ${tools.length}: ${names.join(", ")}`);
+      assert.equal(tools.length, 24, `expected 24 tools, got ${tools.length}: ${names.join(", ")}`);
       assert.deepEqual(names, [...EXPECTED_TOOLS].sort());
     });
   });

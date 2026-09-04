@@ -122,9 +122,39 @@ WORKTREE_BASE  = $HOME/.local/share/local-mcp-dev-runner/worktrees
 - `run_script` 自 v2.0.0 起在 macOS Seatbelt 沙箱内可达（仅 npm/pnpm、hash 钉死、无网络），其 `outputSchema` 仍是契约占位但运行时可执行；设计权威与冻结约束见 [docs/P2_PROCESS_SANDBOX_DESIGN.md](docs/P2_PROCESS_SANDBOX_DESIGN.md)。
 - 输入契约（`inputSchema`）零变更：本工作包只新增输出侧契约，未触碰任何工具参数。输入兼容性由 `npm run gate:input-compat` 守护（与基线 commit `8137b48` 逐字段对比）。
 
-相关测试见 `tests/schema.test.mjs`：既验证 22/22 工具都声明了 `outputSchema`，也用真实工具调用把 `structuredContent` 对照其声明的 `outputSchema` 做 JSON Schema 校验。
+相关测试见 `tests/schema.test.mjs`：既验证 24/24 工具都声明了 `outputSchema`，也用真实工具调用把 `structuredContent` 对照其声明的 `outputSchema` 做 JSON Schema 校验。
 
-## 8. 相关文档
+## 8. 受限 GitHub 仓库管理架构（v2.1.0）
+
+v2.1.0 在原有 22 个工具基础上扩展了 2 个受控的 GitHub 管理工具：`github_repository_info` 与 `github_repository_create`。
+
+```
+ChatGPT (via MCP)
+    │
+    ▼
+Local MCP Dev Runner (server.mjs)
+    │
+    ├── 1. 读取 projects.json (github.enabled & github.allowedOrganizations)
+    │      FAIL-CLOSED: 未启用或 Org 未授权直接拒绝
+    │
+    ├── 2. 从 macOS Keychain 读取 Token (仅在调用时拉取，不持久化、不回显)
+    │      服务名: local-mcp-dev-runner-github-api-token
+    │      FAIL-CLOSED: 凭证缺失直接拒绝，绝不 fallback 到 .env/环境变量
+    │
+    ├── 3. 严格受限的官方 API (HTTPS https://api.github.com)
+    │      - 查询: GET /repos/{owner}/{repo}
+    │      - 创建: POST /orgs/{org}/repos (auto_init=false, 严格幂等)
+    │
+    └── 4. 写入结构化审计日志 ($RUNTIME_ROOT/logs/github-audit.log)
+           记录操作、组织、仓库、可见性与状态，严格脱敏所有认证信息
+```
+
+架构关键不变式：
+- **无 Git push 桥接**：创建空仓库不等于拥有代码推送通道，现有 `NO_GIT_PUSH=YES` 绝对保持。
+- **无任意网络调用**：Host 固定为 `api.github.com`，防 SSRF。
+- **零破坏性变更**：不提供删除仓库、重命名、权限变更等能力；创建操作具备严格幂等性，已存在匹配时返回 `ALREADY_EXISTS`，冲突时显式中断并等待人工处理。
+
+## 9. 相关文档
 
 - [docs/SOURCE_VS_RUNTIME.md](docs/SOURCE_VS_RUNTIME.md) — 两个根目录的详细职责与判定规则
 - [docs/OPERATIONS.md](docs/OPERATIONS.md) — 部署、回滚、运行手册
