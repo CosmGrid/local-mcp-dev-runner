@@ -121,9 +121,38 @@ function assertSafeRelativeLexical(requestedPath, { allowDot = true } = {}) {
   return value;
 }
 
+function formatUserError(code, what, next) {
+  return `${code}: ${what} (Next step: ${next})`;
+}
+
 async function loadRegistry() {
-  const raw = await fs.readFile(CONFIG_FILE, "utf8");
-  const parsed = JSON.parse(raw);
+  let raw;
+  try {
+    raw = await fs.readFile(CONFIG_FILE, "utf8");
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      throw new Error(
+        formatUserError(
+          "CONFIG_NOT_FOUND",
+          `Configuration file does not exist at ${CONFIG_FILE}`,
+          "Run 'node server.mjs --init' to generate a template configuration."
+        )
+      );
+    }
+    throw error;
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    throw new Error(
+      formatUserError(
+        "CONFIG_JSON_PARSE_ERROR",
+        `Failed to parse JSON registry at ${CONFIG_FILE} (${error?.message || "syntax error"})`,
+        "Check syntax of projects.json or re-initialize with 'node server.mjs --init --force'."
+      )
+    );
+  }
   if (!parsed.projects || typeof parsed.projects !== "object") {
     throw new Error("Invalid projects registry");
   }
@@ -150,7 +179,13 @@ async function saveRegistry(registry) {
 async function resolveProject(projectName) {
   const registry = await loadRegistry();
   const raw = registry.projects[projectName];
-  if (!raw) throw new Error(`Unknown project: ${projectName}`);
+  if (!raw) {
+    const known = Object.keys(registry.projects || {}).sort();
+    const hint = known.length > 0 ? `Known projects: ${known.join(", ")}` : "No projects registered in projects.json yet";
+    throw new Error(
+      `Unknown project: ${projectName}. ${hint}. Run list_projects to see registered projects.`
+    );
+  }
   const root = await fs.realpath(raw.root);
   return {
     name: projectName,
@@ -1567,6 +1602,116 @@ server.registerTool(
     return structured(payload, summary);
   }
 );
+
+async function handleCliInit() {
+  const args = process.argv.slice(2);
+  const isInit = args.includes("--init");
+  if (!isInit) return false;
+
+  const force = args.includes("--force");
+  let exists = false;
+  try {
+    await fs.access(CONFIG_FILE);
+    exists = true;
+  } catch {
+    exists = false;
+  }
+
+  if (exists && !force) {
+    console.error(`INIT_RESULT=CONFIG_ALREADY_EXISTS`);
+    console.error(`Existing configuration file found at: ${CONFIG_FILE}`);
+    console.error(`Refusing to overwrite without --force. Use: node server.mjs --init --force`);
+    process.exit(1);
+  }
+
+  const template = {
+    _comment: [
+      "Local MCP Dev Runner — Registered Projects",
+      "Documentation: docs/QUICKSTART.md",
+      "Add project entries under 'projects' below.",
+      "Projects default to read-only (write=false). To make changes, use git_worktree_create."
+    ].join(" "),
+    projects: {},
+    _template: {
+      _doc: "Copy this block into projects.<name> and fill in the absolute root path.",
+      root: "<ABSOLUTE_PATH_TO_PROJECT_ROOT>",
+      write: false,
+      runScripts: false,
+      allowedScripts: []
+    }
+  };
+
+  await fs.mkdir(path.dirname(CONFIG_FILE), { recursive: true });
+  await fs.writeFile(CONFIG_FILE, JSON.stringify(template, null, 2) + "\n", {
+    encoding: "utf8",
+    mode: 0o600
+  });
+
+  const status = exists ? "OVERWRITTEN" : "CREATED";
+  console.log(`INIT_RESULT=${status}`);
+  console.log(`CONFIG_PATH=${CONFIG_FILE}`);
+  console.log(`Initialized projects registry successfully with mode 0600.`);
+  process.exit(0);
+}
+
+async function runStartupHealthCheck() {
+  const checks = [];
+
+  // Check 1: CONFIG_FILE exists and parses cleanly
+  let configOk = true;
+  let parsedRegistry = null;
+  try {
+    const raw = await fs.readFile(CONFIG_FILE, "utf8");
+    parsedRegistry = JSON.parse(raw);
+    if (!parsedRegistry.projects || typeof parsedRegistry.projects !== "object") {
+      checks.push("PROJECTS_CONFIG=FAIL (missing 'projects' object in projects.json)");
+      configOk = false;
+    } else {
+      checks.push("PROJECTS_CONFIG=PASS");
+      const projectCount = Object.keys(parsedRegistry.projects).length;
+      checks.push(`REGISTERED_PROJECTS=${projectCount}`);
+    }
+  } catch (error) {
+    configOk = false;
+    if (error?.code === "ENOENT") {
+      checks.push("PROJECTS_CONFIG=WARN (projects.json not found; run 'node server.mjs --init' to generate template)");
+    } else {
+      checks.push(`PROJECTS_CONFIG=FAIL (failed to parse: ${error?.message || "unknown error"})`);
+    }
+    checks.push("REGISTERED_PROJECTS=0");
+  }
+
+  // Check 2: WORKTREE_BASE directory readiness
+  try {
+    await fs.mkdir(WORKTREE_BASE, { recursive: true });
+    checks.push("WORKTREE_BASE=PASS");
+  } catch (error) {
+    checks.push(`WORKTREE_BASE=FAIL (${error?.message || "cannot create or access worktree base directory"})`);
+  }
+
+  // Check 3: SANDBOX_BACKEND availability
+  try {
+    const backend = getSandboxBackend();
+    const probe = await backend.isAvailable();
+    checks.push(`SANDBOX_BACKEND=${probe.available ? "AVAILABLE" : "UNAVAILABLE"}`);
+  } catch {
+    checks.push("SANDBOX_BACKEND=UNKNOWN");
+  }
+
+  return checks;
+}
+
+if (process.argv.includes("--init")) {
+  await handleCliInit();
+}
+
+if (process.argv.includes("--health-check") || process.argv.includes("--check-health")) {
+  const results = await runStartupHealthCheck();
+  for (const line of results) {
+    console.log(line);
+  }
+  process.exit(0);
+}
 
 const transport = new StdioServerTransport();
 await server.connect(transport);
