@@ -95,7 +95,7 @@ log "update-runtime: verifying source build"
 INVENTORY="$SOURCE_ROOT/scripts/check-inventory.mjs"
 if [ -f "$INVENTORY" ]; then
   "$NODE_BIN" "$INVENTORY" --server "$SOURCE_ROOT/server.mjs" \
-    || fail "source build failed the 22-tool inventory gate"
+    || fail "source build failed the inventory gate"
 else
   log "update-runtime: WARNING inventory gate not found; skipping (not fatal)"
 fi

@@ -85,7 +85,7 @@ fi
 # 4. tool inventory (isolated HOME; real config is never read)
 if [ -f "$RUNTIME_ROOT/server.mjs" ] && [ -d "$RUNTIME_ROOT/node_modules/@modelcontextprotocol" ]; then
   if "$NODE_BIN" "$SOURCE_ROOT/scripts/check-inventory.mjs" --server "$RUNTIME_ROOT/server.mjs" >/tmp/lmdr-verify-inventory.$$ 2>&1; then
-    ok "deployed build exposes the 22 baseline tools"
+    ok "deployed build exposes the 24 tools"
     rm -f "/tmp/lmdr-verify-inventory.$$"
   else
     bad "deployed build failed the inventory gate"
