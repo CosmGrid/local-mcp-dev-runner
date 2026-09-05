@@ -89,7 +89,9 @@ export function sha256(value) {
  * Build a throwaway runner world.
  *
  * @param {object}  [options]
- * @param {object}  [options.projects]        extra registry entries merged into the defaults
+ * @param {object}  [options.projects]           extra registry entries merged into the defaults
+ * @param {object}  [options.trustedWorkspaces]  trustedWorkspaces block merged into the registry
+ *                                               ({ alias: { root, enabled?, maxDepth? } })
  * @param {string}  [options.globalGitConfig] contents of the fake $HOME/.gitconfig.
  *                                            "{{ROOT}}" is replaced with the fixture root,
  *                                            which is how core.attributesfile is exercised.
@@ -101,6 +103,7 @@ export function sha256(value) {
 export async function createFixture(options = {}) {
   const {
     projects = {},
+    trustedWorkspaces = null,
     globalGitConfig = BASE_GITCONFIG,
     sourceFiles = [],
     rootFiles = [],
@@ -179,6 +182,9 @@ export async function createFixture(options = {}) {
       ...projects
     }
   };
+  // Only emit the key when a test opts in, so every pre-existing fixture keeps
+  // exercising the no-trustedWorkspaces (backward compatible) code path.
+  if (trustedWorkspaces !== null) registry.trustedWorkspaces = trustedWorkspaces;
   await writeRegistry(registryPath, registry);
 
   const fixture = {
@@ -194,6 +200,29 @@ export async function createFixture(options = {}) {
     extraDirs: Object.fromEntries(extraProjectDirs.map((entry) => [entry.key, path.join(root, entry.key)])),
     git: (args) => git(sourceDir, env, args),
     gitAt: (cwd, args) => git(cwd, env, args),
+    /**
+     * Create a real Git repository at <fixture root>/<relativePath>.
+     * Used by the trusted-workspace discovery suite to build workspace trees.
+     */
+    async makeRepo(relativePath, files = [["README.md", "# repo\n"]]) {
+      const dir = path.join(root, relativePath);
+      await mkdir(dir, { recursive: true });
+      for (const [rel, content] of files) {
+        const target = path.join(dir, rel);
+        await mkdir(path.dirname(target), { recursive: true });
+        await writeFile(target, content, "utf8");
+      }
+      await git(dir, env, ["init", "-b", "main"]);
+      await git(dir, env, ["add", "-A"]);
+      await git(dir, env, ["commit", "-m", `fixture: ${relativePath} initial commit`]);
+      return dir;
+    },
+    /** Create a non-git directory at <fixture root>/<relativePath>. */
+    async makeDir(relativePath) {
+      const dir = path.join(root, relativePath);
+      await mkdir(dir, { recursive: true });
+      return dir;
+    },
     async readRegistry() {
       return JSON.parse(await readFile(registryPath, "utf8"));
     },

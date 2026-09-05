@@ -14,6 +14,14 @@
       "CosmGrid"
     ]
   },
+  "trustedWorkspaces": {
+    "<workspace-alias>": {
+      "_doc": "Optional. A development directory you trust. Git repositories inside it are auto-discovered as READ_ONLY projects with runScripts=false. Remove this block entirely to keep per-project registration only.",
+      "root": "<ABSOLUTE_PATH_TO_WORKSPACE_ROOT>",
+      "maxDepth": 3,
+      "enabled": true
+    }
+  },
   "projects": {
     "<project-name>": {
       "_doc": "Original repository. Keep write=false so the source of truth stays untouched.",
@@ -40,6 +48,15 @@
     "branch": "Set automatically by git_worktree_create. Do not author this by hand.",
     "protectedBranches": "Optional extra branch names that must reject writes. Defaults already cover main and master.",
     "github.enabled": "Optional boolean. When true, enables restricted GitHub repository management (github_repository_info, github_repository_create). Requires token in macOS Keychain service 'local-mcp-dev-runner-github-api-token'. Default false.",
-    "github.allowedOrganizations": "Array of GitHub organizations authorized for repository queries and creation. Requests for any organization outside this list FAIL-CLOSED."
+    "github.allowedOrganizations": "Array of GitHub organizations authorized for repository queries and creation. Requests for any organization outside this list FAIL-CLOSED.",
+
+    "trustedWorkspaces": "Object map of { alias: { root, maxDepth?, enabled? } }. Each alias declares ONE trusted development directory. Key = workspace alias (^[a-zA-Z0-9][a-zA-Z0-9_-]{0,39}$).",
+    "trustedWorkspaces.<alias>.root": "Absolute path to the workspace root. Must exist and resolve with realpath. Broad roots (/, /Users, /System, /tmp, /private, ...) are rejected.",
+    "trustedWorkspaces.<alias>.maxDepth": "Optional scan depth, 1-5, default 3. Depth 3 reaches <root>/group/subgroup/repo.",
+    "trustedWorkspaces.<alias>.enabled": "Optional boolean, default true. false skips the workspace without removing its declaration.",
+
+    "[discovery] permissions": "Auto-discovered repositories are ALWAYS write=false and runScripts=false. No configuration field can raise them. To write, use git_worktree_create on the discovered project.",
+    "[discovery] naming": "A discovered repository is exposed by its directory name when that name is unambiguous, otherwise by its stable id '<alias>/<path/relative/to/workspace>'. Both forms resolve.",
+    "[discovery] precedence": "Explicit projects always win. A repository already registered under 'projects' is never also exposed as auto-discovered."
   }
 }

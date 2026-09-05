@@ -18,6 +18,9 @@ import { REASON } from "./scripts/script-policy.mjs";
 import { GitHubApiClient } from "./scripts/github-client.mjs";
 import { getRepositoryInfo, createRepository } from "./scripts/github-manager.mjs";
 
+// Trusted Workspace — Git repository auto-discovery (READ_ONLY, runScripts=false)
+import { buildDiscoveryIndex, resolveDiscoveredProject } from "./scripts/workspace-discovery.mjs";
+
 const CONFIG_FILE = path.join(os.homedir(), ".config", "local-mcp-dev-runner", "projects.json");
 const WORKTREE_BASE = path.join(os.homedir(), ".local", "share", "local-mcp-dev-runner", "worktrees");
 const MAX_FILE_BYTES = 200 * 1024;
@@ -180,19 +183,15 @@ async function saveRegistry(registry) {
   }
 }
 
-async function resolveProject(projectName) {
-  const registry = await loadRegistry();
-  const raw = registry.projects[projectName];
-  if (!raw) {
-    const known = Object.keys(registry.projects || {}).sort();
-    const hint = known.length > 0 ? `Known projects: ${known.join(", ")}` : "No projects registered in projects.json yet";
-    throw new Error(
-      `Unknown project: ${projectName}. ${hint}. Run list_projects to see registered projects.`
-    );
-  }
+/**
+ * Materialise an explicitly configured project. Identical semantics to the
+ * pre-discovery behaviour: explicit configuration is authoritative and may
+ * legitimately declare write/runScripts.
+ */
+async function materializeConfiguredProject(name, raw) {
   const root = await fs.realpath(raw.root);
   return {
-    name: projectName,
+    name,
     root,
     write: raw.write === true,
     managedWorktree: raw.managedWorktree === true,
@@ -202,8 +201,63 @@ async function resolveProject(projectName) {
     runScripts: raw.runScripts === true,
     allowedScripts: Array.isArray(raw.allowedScripts) ? raw.allowedScripts : [],
     scriptHashes: raw.scriptHashes && typeof raw.scriptHashes === "object" ? { ...raw.scriptHashes } : {},
-    packageManager: typeof raw.packageManager === "string" ? raw.packageManager : null
+    packageManager: typeof raw.packageManager === "string" ? raw.packageManager : null,
+    discovered: false,
+    workspace: null
   };
+}
+
+/**
+ * Materialise an auto-discovered workspace project. Permissions are taken from
+ * the discovery layer, which hard-codes write=false and runScripts=false; the
+ * root is re-realpath'd here so discovery can never hand out a stale or
+ * redirected path. All downstream guards (sensitive path, permission, worktree,
+ * runScripts, branch protection) apply unchanged.
+ */
+async function materializeDiscoveredProject(entry) {
+  const root = await fs.realpath(entry.root);
+  return {
+    name: entry.name,
+    root,
+    write: false,
+    managedWorktree: false,
+    sourceProject: null,
+    branch: null,
+    protectedBranches: [],
+    runScripts: false,
+    allowedScripts: [],
+    scriptHashes: {},
+    packageManager: null,
+    discovered: true,
+    workspace: entry.workspace
+  };
+}
+
+async function resolveProject(projectName) {
+  const registry = await loadRegistry();
+  const raw = registry.projects[projectName];
+  if (raw) return materializeConfiguredProject(projectName, raw);
+
+  // Not explicitly registered: fall back to trusted-workspace discovery.
+  // Configurations without trustedWorkspaces return an empty index without
+  // touching the filesystem, so pre-existing behaviour is unchanged.
+  const index = await buildDiscoveryIndex(registry);
+  const match = resolveDiscoveredProject(index, projectName);
+
+  if (match.ambiguous) {
+    throw new Error(
+      `Ambiguous project: ${projectName}. ${match.candidates.length} auto-discovered repositories share this name: ` +
+      `${match.candidates.join(", ")}. ` +
+      `Use the fully qualified id (workspaceAlias/path/to/repo) instead. Run list_projects to see available projects.`
+    );
+  }
+  if (match.found) return materializeDiscoveredProject(match.project);
+
+  const known = [...Object.keys(registry.projects || {}), ...index.entries.map((entry) => entry.name)].sort();
+  const hint = known.length > 0 ? `Known projects: ${known.join(", ")}` : "No projects registered in projects.json yet";
+  throw new Error(
+    `Unknown project: ${projectName}. ${hint}. Run list_projects to see registered projects.`
+  );
 }
 
 /**
@@ -770,7 +824,7 @@ server.registerTool(
   "list_projects",
   {
     title: "List registered projects",
-    description: "List projects registered with the local MCP runner and their access mode.",
+    description: "List projects registered with the local MCP runner and their access mode. Auto-discovered repositories from trusted workspaces are included as READ_ONLY.",
     inputSchema: z.object({}),
     outputSchema: z.object({
       projects: z.array(z.object({
@@ -778,19 +832,40 @@ server.registerTool(
         mode: z.enum(["READ_ONLY", "READ_WRITE"]),
         managedWorktree: z.boolean(),
         sourceProject: z.string().nullable(),
-        branch: z.string().nullable()
+        branch: z.string().nullable(),
+        source: z.enum(["explicit", "workspace"]),
+        workspace: z.string().nullable()
       }))
     })
   },
   async () => {
     const registry = await loadRegistry();
-    const projects = Object.entries(registry.projects).map(([name, project]) => ({
+    const index = await buildDiscoveryIndex(registry);
+
+    const explicit = Object.entries(registry.projects).map(([name, project]) => ({
       name,
       mode: project.write === true ? "READ_WRITE" : "READ_ONLY",
       managedWorktree: project.managedWorktree === true,
       sourceProject: project.sourceProject || null,
-      branch: project.branch || null
+      branch: project.branch || null,
+      source: "explicit",
+      workspace: null
     }));
+
+    // Discovery never overrides an explicit entry and never duplicates one.
+    const discovered = index.entries.map((entry) => ({
+      name: entry.name,
+      mode: "READ_ONLY",
+      managedWorktree: false,
+      sourceProject: null,
+      branch: null,
+      source: "workspace",
+      workspace: entry.workspace
+    }));
+
+    const projects = [...explicit, ...discovered].sort((a, b) =>
+      a.name < b.name ? -1 : a.name > b.name ? 1 : 0
+    );
     return structured({ projects }, projects);
   }
 );
@@ -1765,6 +1840,7 @@ async function handleCliInit() {
       ]
     },
     projects: {},
+    trustedWorkspaces: {},
     _template: {
       _doc: "Copy this block into projects.<name> and fill in the absolute root path.",
       root: "<ABSOLUTE_PATH_TO_PROJECT_ROOT>",

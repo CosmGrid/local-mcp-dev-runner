@@ -12,7 +12,7 @@
   "scripts": {
     "start": "node server.mjs",
     "check": "node scripts/check-syntax.mjs",
-    "test": "node --test --test-concurrency=4 tests/*.test.mjs tests/security/*.test.mjs tests/p2/*.test.mjs tests/github/*.test.mjs",
+    "test": "node --test --test-concurrency=4 tests/*.test.mjs tests/security/*.test.mjs tests/p2/*.test.mjs tests/github/*.test.mjs tests/workspace/*.test.mjs",
     "test:inventory": "node --test tests/inventory.test.mjs",
     "test:security": "node --test --test-concurrency=4 tests/security/*.test.mjs",
     "test:p2": "node --test --test-concurrency=4 tests/p2/*.test.mjs",

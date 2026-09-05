@@ -103,6 +103,40 @@ $HOME/.config/local-mcp-dev-runner/projects.json
 
 字段含义见 `config/projects.example.json` 内的 `_fieldReference`。
 
+### 5.1 Trusted Workspace 自动发现
+
+不想逐个登记项目时，可以声明一个你信任的开发 Workspace，Runner 会自动发现其中的 Git 仓库：
+
+```jsonc
+{
+  "trustedWorkspaces": {
+    "cosm": {
+      "root": "/Users/me/Desktop/开发/CosmGrid",
+      "maxDepth": 3,          // 可选，1-5，默认 3
+      "enabled": true         // 可选，默认 true
+    }
+  }
+}
+```
+
+发现行为：
+
+- Workspace 内、扫描深度内的 Git 仓库会被自动发现，并作为 **READ_ONLY** 项目暴露，`runScripts=false`。
+- `list_projects` 会合并「显式 `projects`」与「自动发现项目」，去重且按名称排序。
+- `project_info` 对两者一视同仁，realpath / policy / 敏感路径 / 权限 / worktree 检查全部照旧。
+- 命名：目录名全局唯一时用短名（如 `api`）；重名时用稳定 ID（如 `cosm/services/api`）。两种形式都可解析；用短名命中多个仓库时返回明确 ambiguity，绝不猜测。
+- 优先级：**显式 `projects` 永远优先**。已手工登记的仓库不会重复暴露为自动发现项目。
+
+安全边界：
+
+- 自动发现 **永远不会** 授予 write / runScripts，任何试图从配置里抬升这些默认值的字段都会被忽略。
+- 扫描不跨越 Workspace 的 realpath：不跟随符号链接、不进入 `node_modules` 等依赖目录、深度与目录数都有上限。
+- 声明 `/`、`/Users`、`/System`、`/tmp` 这类过宽的根会被直接拒绝；Workspace 根不存在或不可读是硬错误（fail-closed），不会静默当成「空 Workspace」。
+
+要写代码时流程不变：对自动发现的项目执行 `git_worktree_create`，得到 runner-managed 的 **READ_WRITE** worktree；原仓库本身仍是 READ_ONLY。
+
+不配置 `trustedWorkspaces` 时，行为与本次改动前完全一致。
+
 ## 6. 启动
 
 Runner 自己不常驻、不监听端口，由 MCP 客户端（Tunnel）拉起：
