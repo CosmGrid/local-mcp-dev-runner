@@ -8,7 +8,7 @@ import { githubAuditLogPath } from "../../scripts/github-audit.mjs";
 
 describe("GitHub Repository Manager & Idempotency", () => {
   let runtimeRoot;
-  const FAKE_TOKEN = "ghp_SecretTokenXYZ123456";
+  const FAKE_TOKEN = "TEST_SYNTHETIC_GITHUB_TOKEN_VALUE_FOR_MOCK";
 
   beforeEach(async () => {
     runtimeRoot = await mkdtemp(path.join(tmpdir(), "lmdr-gh-mgr-"));

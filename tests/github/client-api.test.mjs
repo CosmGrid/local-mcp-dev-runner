@@ -28,7 +28,7 @@ describe("GitHubApiClient HTTP & Network Gate", () => {
     await new Promise((resolve) => server.close(resolve));
   });
 
-  const FAKE_TOKEN = "ghp_TestSecretTokenValue123456789";
+  const FAKE_TOKEN = "TEST_SYNTHETIC_GITHUB_TOKEN_VALUE_FOR_MOCK";
 
   it("throws GITHUB_CREDENTIAL_MISSING if token is missing", async () => {
     const client = new GitHubApiClient({ apiBaseUrl: serverUrl });

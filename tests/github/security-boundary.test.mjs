@@ -41,7 +41,7 @@ describe("GitHub Security Boundary & Immutability Gates", () => {
           name: "local-mcp-dev-runner",
           visibility: "private",
           url: "https://evil.com",
-          token: "ghp_leaked",
+          token: "TEST_LEAKED_SYNTHETIC_TOKEN",
           auto_init: true
         }
       });
