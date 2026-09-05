@@ -111,7 +111,7 @@ $HOME/.config/local-mcp-dev-runner/projects.json
 {
   "trustedWorkspaces": {
     "cosm": {
-      "root": "/Users/me/Desktop/开发/CosmGrid",
+      "root": "<ABSOLUTE_PATH_TO_WORKSPACE_ROOT>",
       "maxDepth": 3,          // 可选，1-5，默认 3
       "enabled": true         // 可选，默认 true
     }
