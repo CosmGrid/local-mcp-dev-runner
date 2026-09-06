@@ -16,7 +16,7 @@
 - **易用性打磨**（2026-09-04，`2951ecb`）：`--init` 引导、health check、错误信息优化与 [QUICKSTART](docs/QUICKSTART.md) 指南
 
 ### 运行时
-- 2026-09-06：SOURCE_ROOT 与 RUNTIME_ROOT 的 `server.mjs` / `scripts/workspace-discovery.mjs` SHA-256 逐字节一致，线上 runtime 已运行本版本构建。
+- 2026-09-06：SOURCE_ROOT 与 RUNTIME_ROOT 的 `server.mjs` / `scripts/workspace-discovery.mjs` SHA-256 逐字节一致，本地 runtime 已运行本版本构建。
 
 ### 版本对齐
 - README / package.json / package-lock.json / server.mjs / CHANGELOG 的版本号统一为 2.1.0
@@ -26,7 +26,7 @@
 
 ## [2.0.0] - 2026-09-01 — Sandboxed run_script execution (P2 PROCESS SANDBOX)
 
-> **状态：已合入 main，并随 2026-09-06 的 runtime 部署进入线上（与 [2.1.0](#210-2026-09-06--github-repository-management--workspace-first-auto-discovery) 同一构建）。原生 Seatbelt 隔离门禁（`scripts/run-native-sandbox-gate.sh`）须在 macOS 原生环境执行确认。**
+> **状态：已合入 main，并随 2026-09-06 的部署同步进入本地 Runtime（与 [2.1.0](#210-2026-09-06--github-repository-management--workspace-first-auto-discovery) 同一构建）。原生 Seatbelt 隔离门禁（`scripts/run-native-sandbox-gate.sh`）须在 macOS 原生环境执行确认。**
 
 将 `run_script` 从「永久 DENY」改造为在 macOS Seatbelt 进程沙箱内受控执行 npm / pnpm 脚本。
 

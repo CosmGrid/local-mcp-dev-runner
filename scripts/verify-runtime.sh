@@ -7,7 +7,7 @@
 #   1. RUNTIME_ROOT exists with server.mjs / package.json / package-lock.json
 #   2. server.mjs parses
 #   3. dependencies are present
-#   4. the deployed build exposes exactly the 22 baseline tools
+#   4. the deployed build exposes exactly the 24 tools
 #      (booted under a throwaway HOME, so the real config is never read)
 #   5. the registered-projects config exists and is valid JSON
 #      (contents are never printed)
