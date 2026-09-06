@@ -52,7 +52,7 @@ describe("tool inventory", () => {
     await withFixtureAndRunner({}, async (client) => {
       const info = client.getServerVersion();
       assert.equal(info?.name, "local-mcp-dev-runner");
-      assert.equal(info?.version, "2.0.0");
+      assert.equal(info?.version, "2.1.0");
     });
   });
 

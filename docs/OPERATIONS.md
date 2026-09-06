@@ -117,7 +117,7 @@ cd SOURCE_ROOT
 npm ci                       # 安装开发依赖（含 MCP SDK，用于测试）
 npm run check                # 语法门禁
 npm run gate:security        # 安全策略字符串门禁
-npm run gate:inventory       # 22-tool inventory 门禁
+npm run gate:inventory       # 24-tool inventory 门禁
 npm test                     # HOME 隔离集成测试
 npm run gate:secret-scan     # 密钥扫描
 npm run gate:all             # 一键跑全部门禁

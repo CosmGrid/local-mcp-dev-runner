@@ -1,6 +1,6 @@
 {
   "name": "local-mcp-dev-runner",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "Local MCP dev runner: read-mostly access to registered local repositories over a stdio MCP server, with a runner-managed git worktree as the only writable surface. v2.0.0 adds sandboxed run_script execution (npm/pnpm, hash-pinned, macOS Seatbelt).",
   "private": true,
   "license": "UNLICENSED",

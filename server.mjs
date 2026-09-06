@@ -817,7 +817,7 @@ async function packageScriptsFor(projectName) {
 
 const server = new McpServer({
   name: "local-mcp-dev-runner",
-  version: "2.0.0"
+  version: "2.1.0"
 });
 
 server.registerTool(

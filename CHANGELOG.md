@@ -6,9 +6,27 @@
 
 ---
 
-## [2.0.0] - Unreleased — Sandboxed run_script execution (P2 PROCESS SANDBOX)
+## [2.1.0] - 2026-09-06 — GitHub Repository Management + Workspace-first Auto Discovery
 
-> **状态：源码完成，待原生沙箱门禁通过（`P2_IMPLEMENTATION=PASS_PENDING_NATIVE_GATE`）。本阶段不 deploy runtime，线上仍为 v1.1.0，沙箱能力为源码态、未进入部署产物。**
+自 2.0.0 起合入 main 的 feature 级能力汇总与版本对齐。
+
+### 新增
+- **受限 GitHub 仓库管理**（2026-09-05，`05197b3` / `7434a9b`）：新增 `github_repository_info`、`github_repository_create` 两个工具（白名单组织、Keychain 凭证、幂等创建、无 push、无 delete），工具数 22 → 24；`scripts/check-inventory.mjs` 与部署脚本门禁同步更新至 24 工具
+- **Workspace-first Auto Discovery**（2026-09-06，`73bf6f5` / `bf2d436`）：`projects.json` 新增 `trustedWorkspaces` 配置，server 按配置的 `root` / `maxDepth` 自动发现 Git 仓库并注册为 READ_ONLY、`source=workspace` 的只读项目（`write=false`、`runScripts=false`）；显式 `projects` 条目始终优先；新增 `scripts/workspace-discovery.mjs` 与 `tests/workspace/` 测试组
+- **易用性打磨**（2026-09-04，`2951ecb`）：`--init` 引导、health check、错误信息优化与 [QUICKSTART](docs/QUICKSTART.md) 指南
+
+### 运行时
+- 2026-09-06：SOURCE_ROOT 与 RUNTIME_ROOT 的 `server.mjs` / `scripts/workspace-discovery.mjs` SHA-256 逐字节一致，线上 runtime 已运行本版本构建。
+
+### 版本对齐
+- README / package.json / package-lock.json / server.mjs / CHANGELOG 的版本号统一为 2.1.0
+- [docs/SOURCE_VS_RUNTIME.md](docs/SOURCE_VS_RUNTIME.md) 按当前 `update-runtime.sh` / `verify-runtime.sh` 真实行为重写（`scripts/` 随部署进入 runtime、24 工具门禁、verify 职责与漂移检测）
+
+---
+
+## [2.0.0] - 2026-09-01 — Sandboxed run_script execution (P2 PROCESS SANDBOX)
+
+> **状态：已合入 main，并随 2026-09-06 的 runtime 部署进入线上（与 [2.1.0](#210-2026-09-06--github-repository-management--workspace-first-auto-discovery) 同一构建）。原生 Seatbelt 隔离门禁（`scripts/run-native-sandbox-gate.sh`）须在 macOS 原生环境执行确认。**
 
 将 `run_script` 从「永久 DENY」改造为在 macOS Seatbelt 进程沙箱内受控执行 npm / pnpm 脚本。
 
